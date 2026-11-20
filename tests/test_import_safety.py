@@ -1,6 +1,6 @@
 """Regression tests for message retention, batch writes, and snapshot resume."""
 import base64
-from contextlib import redirect_stderr
+from contextlib import closing, redirect_stderr
 from io import StringIO
 import os
 from pathlib import Path
@@ -68,7 +68,7 @@ class ImportSafetyTests(unittest.TestCase):
         message, _ = outlook.build_message(item, 'mail.pst', 'Inbox', False, False, 0)
         common.store_message(self.db, message)
         self.assertTrue(self.db.in_transaction)
-        with sqlite3.connect(self.db_path) as other:
+        with closing(sqlite3.connect(self.db_path)) as other:
             self.assertEqual(other.execute('SELECT COUNT(*) FROM messages').fetchone()[0], 0)
             self.db.commit()
             self.assertEqual(other.execute('SELECT COUNT(*) FROM messages').fetchone()[0], 1)
