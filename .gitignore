@@ -1,0 +1,46 @@
+# Local mailbox content and all derived artifacts.
+/data/
+/exports/
+/imports/
+*.pst
+*.PST
+*.ost
+*.OST
+*.mbox
+*.eml
+*.msg
+*.sqlite
+*.sqlite3
+*.db
+*.sqlite-*
+*.sqlite3-*
+*.db-*
+*.funes.jsonl
+*.errors.txt
+*.log
+*.tmp
+.email-funes-export-*/
+
+# Only reviewed, synthetic mail fixtures belong in version control.
+!examples/eml/*.eml
+
+# Python and local tools.
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.coverage
+htmlcov/
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Credentials and local memory state.
+.env
+.env.*
+*.pem
+*.key
+.funes*/
+.cache/
