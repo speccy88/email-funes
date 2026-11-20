@@ -96,7 +96,9 @@ def insert_record(conn,pst,path,idx,mid,subject='',sender='',body='',to=''):
 class RecoveryTests(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory()
-        self.directory=Path(self.temp.name)
+        # The importer CLI resolves paths before storing source identities.
+        # Windows may supply an abbreviated (8.3) temporary-directory path.
+        self.directory=Path(self.temp.name).resolve()
         self.pst=self.directory/'archive.pst'
         self.pst.write_bytes(b'FAKE')
         self.old=self.directory/'old.sqlite'
