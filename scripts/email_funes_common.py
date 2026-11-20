@@ -224,7 +224,7 @@ def show_stats(db: sqlite3.Connection):
     dup = db.execute("SELECT COUNT(*) FROM source_items WHERE disposition='duplicate'").fetchone()[0]
     attachments = db.execute("SELECT COALESCE(SUM(attachment_count), 0) FROM messages").fetchone()[0]
     size = db.execute("PRAGMA page_count").fetchone()[0] * db.execute("PRAGMA page_size").fetchone()[0]
-    print(f"Unique emails:       {n:,}")
+    print(f"Stored records:      {n:,}")
     print(f"Original PST entries:{sources:>13,}")
     print(f"Duplicate copies:    {dup:,}")
     print(f"Attachment filenames:{attachments:>13,} (no attachment contents)")

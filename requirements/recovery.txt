@@ -1,0 +1,3 @@
+# Native PST reader plus optional RTF-to-text decoding for --recover-rtf.
+-r pst.txt
+-r rtf.txt

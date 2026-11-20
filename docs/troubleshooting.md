@@ -43,16 +43,38 @@ The direct reader tracks the source file's size and modification time because it
 
 ## Missing addresses, dates, or bodies
 
-Some Outlook items have no transport headers. Their sender address, To/Cc, or Message-ID can be unavailable even when the subject/body exists. RTF-only messages can lack a usable body. The importer reports missing fields; the exporter skips records with no sent or received timestamp.
+Some Outlook items have incomplete transport headers but retain metadata in MAPI properties or a native recipient table. Run the [metadata audit and recovery](metadata-recovery.md) against the unchanged original PST. It fills missing fields in a new SQLite copy and reports unresolved cases.
 
-Check the corresponding messages in the original archive. A missing field is an extraction limitation, not evidence that the original message lacked useful information.
+Optional `--recover-rtf` needs the packages in `requirements/recovery.txt`. RTF extraction can recover additional text, but a remaining empty body is not proof of a damaged message: attachment-only emails and non-email objects can also have empty bodies. Check the relevant item in the source archive if its contents matter.
+
+Recovery does not invent dates. The exporter skips records with neither a sent nor a received timestamp.
+
+## Recovery matches no source items
+
+Check that the PST is the original unchanged snapshot at the path used for the first import. Source keys include the PST path, folder path, and item position. A Windows-to-Linux path change will generally prevent matching even if the file's bytes are identical.
+
+Run the recovery where the original path is available, then move the enriched SQLite to Linux for JSONL export and Funes. Do not bypass a snapshot-change error by editing `source_items` or the stored baseline.
+
+## Recovery test output looks as large as the full database
+
+`--limit-matched` limits enrichment, not the initial SQLite backup. A pilot copy contains all original records but only a subset has recovery metadata. Use the report's unique-enriched count or count rows in `recovery_metadata` to distinguish a pilot from a full recovery.
+
+For the full run, pass the original un-enriched database and a new output name. An existing enriched input or output is rejected; recovery does not resume a pilot copy in place. Use the full recovery output for production JSONL: unprocessed pilot rows have no category and are excluded by the default email selection.
+
+## Export policy differs from the previous run
+
+The first export stores its selection and recipient-rendering policy alongside `funes_map`. Later exports must use the same choices, including `--include-meetings`, `--include-all`, and `--include-bcc`. A new output folder does not reset the database's policy.
+
+For a deliberate policy change, keep the existing database and derive a separate export from a copy made before its first mapping. Build a separate Funes memory when the changed policy affects already-indexed text. Do not remove mapped rows or renumber sequences to bypass the check.
+
+An enriched database carrying an earlier legacy mapping also needs this deliberate rebuild decision. Enrichment can change text under existing IDs, which Funes will not replace automatically.
 
 ## “Output must be a new or empty directory”
 
 Use a new export directory:
 
 ```powershell
-python scripts/sqlite_to_funes.py --db data/email.sqlite --out data/funes-export-02
+python scripts/sqlite_to_funes.py --db data/email_enriched.sqlite --out data/funes-export-02
 ```
 
 This avoids stale JSONL files from an earlier, larger export. Keep `funes_map` in the same database so turn identities remain stable between snapshots.

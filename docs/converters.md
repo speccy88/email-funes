@@ -1,6 +1,6 @@
 # Converter reference
 
-Run commands from the repository root. The main sequence is a source reader, SQLite, then the shared Funes exporter.
+Run commands from the repository root. The main sequence is a source reader, SQLite, optional metadata recovery, then the shared Funes exporter.
 
 ## Direct PST reader
 
@@ -58,19 +58,68 @@ This Windows-only adapter uses Outlook Classic's COM object model. It needs a us
 
 This adapter is retained for compatibility with the initial scripts. It may temporarily mount a PST in the Outlook profile; Outlook can update local PST metadata. The direct reader is the main workflow.
 
+## PST metadata audit and recovery
+
+Use `pst_metadata_audit.py` to measure native property coverage and `pst_sqlite_recover.py` to enrich a fresh copy of an existing import. These commands share the `pypff` dependency. Recovery can also decode RTF text with optional `striprtf`.
+
+```powershell
+python scripts/pst_metadata_audit.py --pst "C:\MailArchives\archive.pst" --db data/email.sqlite --out data/audit.log --full
+python scripts/pst_sqlite_recover.py --pst "C:\MailArchives\archive.pst" --db data/email.sqlite --out-db data/email_enriched.sqlite --log data/recovery.log --recover-rtf
+```
+
+The original PST path and immutable snapshot are part of source matching. Recovery does not add filtered source items or rewrite existing message identities. It adds item classification, structured recipients, recovered fields, and provenance to the copy. Its aggregate log contains no message text or addresses.
+
+See the [metadata recovery guide](metadata-recovery.md) for dependencies, flags, pilot runs, source checks, and limitations.
+
 ## SQLite to Funes
 
 ```powershell
-python scripts/sqlite_to_funes.py --db data/email.sqlite --out data/funes-export
+python scripts/sqlite_to_funes.py --db data/email_enriched.sqlite --dry-run
+python scripts/sqlite_to_funes.py --db data/email_enriched.sqlite --out data/funes-export
 ```
 
-The exporter uses only the Python standard library. It adds a `funes_map` table to the database to persist each email's `session_id`, `turn_uuid`, and `seq`. Back up that table with the messages.
+The exporter uses only the Python standard library. Preview is read-only: it reports category, selection, missing-date, and existing-mapping counts without producing JSONL or changing SQLite. It checks policy compatibility but does not fully validate message content or timestamp syntax.
 
-Files contain up to 2,000 turns by default; change this with `--turns-per-file N`. Files can contain several sessions, and a session can span files. Later-discovered emails append to their session's sequence even when their timestamp is older.
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--db PATH` | Required | Existing email-funes SQLite database |
+| `--out PATH` | Required unless `--dry-run` | New or empty JSONL destination directory |
+| `--dry-run` | Off | Read-only selection and policy preview |
+| `--include-meetings` | Off | Include meeting messages alongside email |
+| `--include-all` | Off | Include all retained item categories; mutually exclusive with `--include-meetings` |
+| `--include-bcc` | Off | Include available Bcc recipients in the rendered turn text |
+| `--turns-per-file N` | `2000` | Maximum turns per output file |
+
+### Record selection and recipients
+
+When recovery classification exists, the default selects the `Email / IPM.Note` category. `--include-meetings` also selects `Meeting request`, which covers meeting-message subclasses such as invitations and responses. Appointments, contacts, tasks, notes, and unclassified records require `--include-all`.
+
+Without recovery classification, the exporter retains the earlier all-record behavior and prints a notice. Use recovery to obtain an email-only selection based on native message classes.
+
+Normalized recipient rows take precedence over the original flattened To/Cc text. If a recipient type has no normalized rows, the exporter uses the original field where available. Existing but empty typed rows do not fall back to an older display list. It retains unresolved display names rather than inventing an address. Bcc is opt-in because its inclusion changes the searchable content.
+
+Only the selected records receive new Funes mappings. Records with neither a sent nor a received date stay in SQLite and are skipped; timestamps are never invented. Records with an empty body can still provide searchable subjects, participants, dates, and attachment filenames.
+
+### Stable export state
+
+A normal export adds two tables to SQLite:
+
+- `funes_map` keeps each selected record's `session_id`, `turn_uuid`, and dense `seq`.
+- `funes_export_policy` keeps the selection and recipient-rendering choices, including Bcc inclusion.
+
+Back up these tables together with the messages. Later-discovered emails append to their session's sequence even when their timestamp is older. Files can contain several sessions, and a session can span files.
+
+The exporter rejects a different policy or an existing mapping that conflicts with the selected records. It does not renumber already assigned turns. An older mapping without a policy can be adopted only when its legacy rendering and selection behavior are preserved. An enriched database with an earlier legacy mapping needs a deliberate fresh export state.
+
+If a policy change is necessary, preserve the existing database/export and start from a separate copy of the archive taken **before its first mapping**. Use a separate derived Funes memory for a rebuild. Do not delete mapping rows in a published workflow to force the command through: that can shift sequences or retain old indexed content under reused identities.
+
+### Output and validation
 
 The output must be new or empty. The exporter stages the entire snapshot, validates essential fields, and publishes the directory after success. A failed export does not expose a partial final snapshot. Use a new folder name on the next run; unchanged turn identities let Funes deduplicate re-emitted records.
 
-Emails with neither a sent nor a received date stay in SQLite and are skipped during Funes mapping. Invalid mapped timestamps or attachment arrays fail the export. The output currently uses `role: member` and `harness: outlook-pst`; future adapters must deliberately extend the producer metadata if they need a different facet.
+Invalid mapped timestamps, malformed attachment filename arrays, or non-dense sequences fail the export. It uses `role: member` and `harness: outlook-pst`; email metadata stays inside one text block. The `role` field is not a sender address, and no undocumented top-level JSON fields are added.
+
+Run `funes index --check` on the completed files before indexing. See the [Funes lifecycle guide](funes-workflow.md) for the consequences of changing already-indexed content.
 
 ## Experimental EML snapshot shortcut
 
@@ -88,11 +137,11 @@ This shortcut loads the parsed snapshot into memory and does not keep a persiste
 
 ## Known limitations
 
-- PST plain text is preferred, with HTML-to-text as a fallback. RTF-only messages may have empty bodies.
-- Sender/recipient addresses read from transport headers can be missing, particularly on sent or unsent Outlook items. Missing data is not fabricated.
+- The first-pass PST importer prefers plain text with HTML-to-text fallback. The separate recovery pass can try RTF; unreadable or absent representations still leave empty bodies.
+- Transport headers can omit sender/recipient addresses, particularly on sent or unsent Outlook items. The recovery pass reads MAPI fields and recipient tables; unresolved addresses remain unresolved.
 - Outlook conversation indexes and complete References chains can group replies; incomplete or mixed metadata can split threads. Subjects alone do not prove a shared conversation.
 - Inline images can be reported as attachment filenames. Excluded documents and images cannot contribute their contents to search.
-- Only email extraction is in scope; calendars, contacts, tasks, embedded-message contents, and attachment text are not a complete part of this archive model.
+- Calendar, contact, and task objects can occur in the original import. Recovery classifies them for export filtering, but this project does not reconstruct their complete native schemas. Embedded-message contents and attachment text remain excluded.
 - Signatures, quoted history, and security banners remain in extracted bodies. No semantic rewriting or automatic reply pruning is performed.
 - Tests are synthetic. Native reader compatibility and extraction completeness must be checked on the actual archive, including error logs and representative samples.
 - Existing v3 databases remain readable. Existing rows, fingerprints, and session IDs are not rewritten. Use a new database for uniform application of the repository edition's deduplication and threading rules. An older populated database receives a warning when its first PST snapshot baseline is recorded.

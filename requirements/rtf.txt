@@ -1,0 +1,3 @@
+# Optional RTF-to-text decoding; also used by the decoder regression test in CI.
+# Verified upstream release: https://pypi.org/project/striprtf/0.0.35/
+striprtf==0.0.35

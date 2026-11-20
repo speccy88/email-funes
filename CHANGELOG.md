@@ -1,5 +1,16 @@
 # Changes
 
+## Metadata recovery and enriched export — 2026-11-20
+
+- Added the PST metadata audit and second-pass SQLite recovery commands to the repository.
+- Added native MAPI sender fields, structured To/Cc/Bcc recipients, item classification, unambiguous local Exchange address resolution, optional RTF body recovery, and field provenance.
+- Preserved the original SQLite database, existing message/thread identities, and attachment-filename-only storage.
+- Hardened per-message rollback accounting, Unicode text handling, source snapshot checks, and aggregate recovery logs.
+- Added read-only export previews, an email-only default for classified archives, optional meetings/all-item/Bcc selection, and normalized recipient rendering.
+- Persisted export policy alongside stable Funes mappings to prevent incompatible selection or rendering changes.
+- Documented the audit → recovery → preview → JSONL workflow, portability limits, and Funes rebuild decisions.
+- Added synthetic regression tests for metadata recovery and enriched exports; kept mailbox databases and logs outside source control.
+
 ## Repository edition — 2026-11-20
 
 - Consolidated the earlier EML prototype and the version 3 PST/SQLite/Funes scripts into one repository.

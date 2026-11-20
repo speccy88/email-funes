@@ -59,7 +59,7 @@ def demo_message(
     )
 
 
-def demo_records() -> list[Message]:
+def demo_records(enriched: bool = False) -> list[Message]:
     first = demo_message(
         1,
         "Demo pump inspection: observations",
@@ -97,18 +97,77 @@ def demo_records() -> list[Message]:
         source_key=sha("synthetic-demo-v1/project-folder/1"),
         folder="Synthetic archive/Project copies",
     )
-    return [first, second, third, duplicate]
+    records = [first, second, third, duplicate]
+    if enriched:
+        records.extend([
+            demo_message(
+                4, "Demo pump inspection: meeting request",
+                "Synthetic meeting request. Review the inspection findings on November 3.",
+                "2026-11-02T16:00:00Z", "planning@example.com", "engineering@example.com",
+                "demo-pump-inspection",
+            ),
+            demo_message(
+                5, "Demo pump inspection: calendar appointment",
+                "Synthetic calendar item. Equipment review in the workshop.",
+                "2026-11-03T16:00:00Z", "planning@example.com", "engineering@example.com",
+                "demo-calendar-appointment",
+            ),
+        ])
+    return records
+
+
+def add_demo_metadata(db) -> None:
+    """Populate the recovery schema with synthetic metadata; no PST is opened."""
+    from pst_sqlite_recover import ensure_schema
+
+    ensure_schema(db)
+    for mid, internet_id, sender, to in db.execute(
+        "SELECT id,internet_message_id,sender_email,to_list FROM messages"
+    ):
+        if internet_id == "demo-4@example.com":
+            klass, category = "IPM.Schedule.Meeting.Request", "Meeting request"
+        elif internet_id == "demo-5@example.com":
+            klass, category = "IPM.Appointment", "Appointment"
+        else:
+            klass, category = "IPM.Note", "Email / IPM.Note"
+        recipients = [("to", "Recipient Demo", to)]
+        if internet_id == "demo-1@example.com":
+            recipients.extend([
+                ("cc", "Maintenance Demo", "maintenance@example.com"),
+                ("bcc", "Archive Demo", "archive@example.com"),
+            ])
+        db.execute(
+            "UPDATE messages SET message_class=?,message_category=?,sender_raw_address=?,"
+            "sender_email_source='synthetic',recipient_to_source='synthetic',"
+            "body_source='synthetic' WHERE id=?", (klass, category, sender, mid),
+        )
+        db.execute(
+            "INSERT INTO recovery_metadata(message_id,mapi_sender_raw,mapi_sender_smtp,"
+            "display_to,recovered_internet_id,recipient_count) VALUES(?,?,?,?,?,?)",
+            (mid, sender, sender, to, internet_id, len(recipients)),
+        )
+        db.executemany(
+            "INSERT INTO recovery_recipients(message_id,ordinal,recipient_type,display_name,"
+            "address_type,address_raw,smtp_address) VALUES(?,?,?,?,'SMTP',?,?)",
+            [(mid, ordinal, kind, name, address, address)
+             for ordinal, (kind, name, address) in enumerate(recipients)],
+        )
+    db.commit()
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--db", type=Path, default=Path("data/demo.sqlite"))
+    parser.add_argument("--enriched", action="store_true",
+                        help="Create a new demo with recovered metadata and non-email Outlook items")
     args = parser.parse_args(argv)
     database = args.db.expanduser().resolve()
+    if args.enriched and database.exists():
+        parser.error("--enriched needs a new demo database path")
     db = open_database(database)
     added = duplicates = already_seen = 0
     try:
-        for record in demo_records():
+        for record in demo_records(args.enriched):
             if source_seen(db, record.source_key):
                 already_seen += 1
                 continue
@@ -118,6 +177,8 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 duplicates += 1
         db.commit()
+        if args.enriched:
+            add_demo_metadata(db)
         print(f"Synthetic demo: new={added}; duplicate occurrences={duplicates}; already seen={already_seen}")
         print(f"Database: {database}")
         show_stats(db)

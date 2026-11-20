@@ -8,7 +8,8 @@ You can use the complete workflow locally. Publishing is optional.
 flowchart TD
     A["Email archive"] --> B["Archive to SQLite converter"]
     B --> C["SQLite messages and metadata"]
-    C --> D["SQLite to Funes exporter"]
+    C --> R["Metadata recovery and item selection"]
+    R --> D["SQLite to Funes exporter"]
     D --> E["Funes JSONL files"]
     E --> F["Validate and index with Funes"]
     F --> G["Local recall or MCP"]
@@ -19,11 +20,18 @@ flowchart TD
 
 ## 1. Prepare the export
 
-Run the archive converter and SQLite exporter described in the [README](../README.md). The result is a directory of `.funes.jsonl` files. Each email becomes a turn, grouped into a session when the importer identifies its conversation.
+Run the archive converter, complete any [metadata recovery](metadata-recovery.md), and preview the selection before exporting:
+
+```bash
+python scripts/sqlite_to_funes.py --db data/email_enriched.sqlite --dry-run
+python scripts/sqlite_to_funes.py --db data/email_enriched.sqlite --out data/funes-export
+```
+
+An enriched database selects email records by default. Choose `--include-meetings`, `--include-all`, or `--include-bcc` before the first export if needed. Each selected record becomes a turn, grouped into a session when the importer identifies its conversation. A dry run reports selection and date availability; `funes index --check` validates the generated files later.
 
 The examples below assume this directory is `./data/funes-export`, relative to the repository root. If conversion and indexing happen on different computers, copy that export directory to the indexing computer and adjust the path. Funes does not read this project's SQLite database directly.
 
-Keep the SQLite database, including its `funes_map` table, when exporting again. That table preserves the turn identifiers and sequence numbers Funes uses for deduplication.
+Keep the SQLite database, including `funes_map` and `funes_export_policy`, when exporting again. They preserve turn identifiers, sequence numbers, and consistent selection/rendering choices. Later exports reject an incompatible policy. See [stable export state](converters.md#stable-export-state).
 
 ## 2. Install Funes
 
@@ -137,7 +145,8 @@ The server exposes read-only `recall`, `get`, and `status` tools. Importing emai
 
 ## Repeating imports and correcting content
 
-- Reuse the SQLite database and stable Funes mapping for repeated exports. Run `funes index --check` before indexing each new export.
+- Complete recovery and choose the record/Bcc policy before the first export and index.
+- Reuse the SQLite database, export policy, and stable Funes mapping for repeated exports. Run `funes index --check` before indexing each new export.
 - Re-emitting an unchanged turn deduplicates. Funes chunk identities depend on the session, turn, block position, and split position, **not the text**.
 - Changing a body under the same identifiers does not replace the existing memory. Future cleaning or correction workflows must create a new turn identity or deliberately rebuild the derived memory.
 - Deleting a message from SQLite does not remove it from a local or published Funes memory. Treat deletion and remote cleanup as separate operations.

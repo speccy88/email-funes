@@ -1,10 +1,58 @@
 # Synthetic examples
 
-These examples contain invented correspondence and `example.com` addresses. They are safe to use for learning the workflow without opening a personal mailbox. None of these commands uploads data.
+The examples contain invented project correspondence and reserved `example.com` addresses. They require only Python and SQLite; no Outlook, PST file, native parser, or account is needed.
 
-## Try SQLite and Funes JSONL without a PST
+## Try the enriched SQLite workflow
 
-Run from the repository root with Python 3.10 or newer:
+Create a new demo database and preview its export:
+
+```powershell
+python examples/create_demo_db.py --db data/demo_enriched.sqlite --enriched
+python scripts/sqlite_to_funes.py --db data/demo_enriched.sqlite --dry-run
+```
+
+This database contains:
+
+| Content | Count |
+| --- | --- |
+| Email messages | 3 |
+| Meeting messages | 1 |
+| Calendar appointments | 1 |
+| Unique retained records | 5 |
+| Source occurrences, including one duplicate | 6 |
+
+It includes synthetic recovery classification and structured To/Cc/Bcc recipients. The generator populates these directly; it does not simulate a real PST recovery run. Two attachment filenames are stored, with no attachment payloads.
+
+Before the first export, compare the choices without changing the database:
+
+```powershell
+python scripts/sqlite_to_funes.py --db data/demo_enriched.sqlite --dry-run --include-meetings
+python scripts/sqlite_to_funes.py --db data/demo_enriched.sqlite --dry-run --include-all --include-bcc
+```
+
+The default selects 3 email turns, `--include-meetings` selects 4 turns, and `--include-all` selects all 5 records. Bcc remains omitted unless requested.
+
+Create the default email-only snapshot:
+
+```powershell
+python scripts/sqlite_to_funes.py --db data/demo_enriched.sqlite --out data/demo-enriched-funes
+```
+
+The first export stores its policy and turn mappings. To try a different policy after exporting, generate another demo database with a different filename and export from that copy. `--enriched` requires a new database path.
+
+With Funes installed, validate the completed files:
+
+```bash
+funes index --check data/demo-enriched-funes
+```
+
+The default enriched example was checked with Funes 1.12.0 on 2026-11-20: 3 turns, 3 chunks, no rejected files, and no duplicate chunk IDs. This validates the synthetic JSONL format; it does not test real PST extraction or Hugging Face publication.
+
+See the [Funes guide](../docs/funes-workflow.md) to index the example locally and retrieve it.
+
+## Try the basic import and deduplication example
+
+The earlier demo remains available without `--enriched`:
 
 ```powershell
 python examples/create_demo_db.py --db data/demo.sqlite
@@ -13,24 +61,16 @@ python scripts/pst_to_sqlite_direct.py --db data/demo.sqlite --search "coupling"
 python scripts/sqlite_to_funes.py --db data/demo.sqlite --out data/demo-funes
 ```
 
-A new demo database contains **3 messages, 4 source occurrences, and 2 conversations**. One message is repeated in a second source folder to exercise deduplication. Two attachment filenames are stored; there are no attachment files or binary contents.
+It creates 3 messages, 4 source occurrences, and 2 conversations. One email is repeated in a second folder to exercise deduplication. Running this basic generator again skips the same source occurrences.
 
-Running the demo generator again skips the same four source occurrences. Use a separate demo database so these records do not mix with your real archive.
+This schema has no recovery classification, so the exporter reports its legacy all-record selection. Keep demo data in a separate database from your actual archive.
 
-The JSONL export can be validated with an installed Funes CLI:
+## Try the EML snapshot converter
 
-```bash
-funes index --check data/demo-funes
-```
-
-See the main [README](../README.md) for local indexing and optional Hugging Face synchronization.
-
-## Try the earlier EML snapshot converter
-
-The two files in [`eml/`](eml/) form one synthetic email thread. The earlier converter exports EML messages directly to Funes JSONL, without the SQLite stage:
+The two files in [`eml/`](eml/) form one synthetic thread. The experimental converter reads EML messages directly, without SQLite:
 
 ```powershell
 python scripts/eml_to_funes.py examples/eml data/demo-eml-funes
 ```
 
-Use a new, empty output directory for that snapshot converter. It is retained as an example of another input format; the SQLite route is the recommended basis for repeatable imports.
+Use a new or empty output directory. This shortcut illustrates another source format; repeatable future EML imports are intended to use the shared SQLite workflow.

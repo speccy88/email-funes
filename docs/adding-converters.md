@@ -8,7 +8,7 @@ New importers should write the shared SQLite model. That keeps Funes export, mes
 | --- | --- |
 | `scripts/<format>_to_sqlite.py` | Parse source records, normalize metadata, provide a CLI |
 | `scripts/email_funes_common.py` | Shared `Message` record, SQLite storage, filters, fingerprinting, and search |
-| `scripts/sqlite_to_funes.py` | Turn the shared database into stable Funes records |
+| `scripts/sqlite_to_funes.py` | Apply a stable selection/rendering policy and export Funes records |
 | `tests/test_<format>.py` | Synthetic extraction and failure-case tests |
 | `examples/` | Small invented inputs using reserved example domains |
 
@@ -22,6 +22,7 @@ New importers should write the shared SQLite model. That keeps Funes export, mes
 6. Assign a conservative, namespaced `conversation_key`; use a separate session when threading evidence is absent.
 7. Use `source_seen()` before repeating work and `store_message()` for atomic message/source/FTS writes. Commit in bounded batches.
 8. Report errors and missing fields. A failed parse must not silently become a complete empty record.
+9. If the source mixes email with other objects, provide explicit classification and document which categories the exporter selects. Preserve typed recipients and provenance when available. Do not silently change an existing export policy.
 
 The shared writer is used like this inside an importer (the source-specific reader must supply a `Message`):
 
@@ -48,7 +49,7 @@ Use the complete [SQLite schema](sqlite-schema.md) for required fields. Keep sou
 
 Use stable message IDs and thread roots. Subject text alone is insufficient: two unrelated messages can have the same subject. Do not renumber exported turns or recalculate existing thread IDs after a memory has been indexed.
 
-The current shared exporter labels records `outlook-pst`. When adding another source, extend its producer selection deliberately (for example a persisted source column and a compatible migration), rather than silently labeling all formats as PST. Keep existing producers and `funes_map` identities stable. The experimental direct EML script is historical code, not the template for incremental synchronization.
+The current shared exporter labels records `outlook-pst`. When adding another source, extend its producer selection deliberately (for example a persisted source column and a compatible migration), rather than silently labeling all formats as PST. Keep existing producers, `funes_map` identities, and export policies stable. Recipient-rendering changes can alter indexed text even when the body is unchanged. The experimental direct EML script is historical code, not the template for incremental synchronization.
 
 ## Tests that matter
 
