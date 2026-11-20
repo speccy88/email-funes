@@ -32,7 +32,7 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - name: Install optional RTF decoder
-        run: python -m pip install --only-binary=:all: -r requirements/rtf.txt
+        run: 'python -m pip install --only-binary=:all: -r requirements/rtf.txt'
       - name: Run offline tests
         run: python -m unittest discover -s tests -v
       - name: Create synthetic SQLite archive
