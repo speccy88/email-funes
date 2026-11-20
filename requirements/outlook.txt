@@ -1,0 +1,2 @@
+# Optional Windows-only reader using Outlook Classic COM.
+pywin32; sys_platform == "win32"

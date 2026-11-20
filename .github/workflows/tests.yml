@@ -1,0 +1,36 @@
+name: Python tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: Python ${{ matrix.python }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python: "3.10"
+          - os: ubuntu-latest
+            python: "3.13"
+          - os: windows-latest
+            python: "3.13"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Run offline tests
+        run: python -m unittest discover -s tests -v
+      - name: Create synthetic SQLite archive
+        run: python examples/create_demo_db.py --db data/demo.sqlite
+      - name: Export synthetic Funes records
+        run: python scripts/sqlite_to_funes.py --db data/demo.sqlite --out data/demo-funes

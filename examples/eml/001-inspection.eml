@@ -1,0 +1,13 @@
+From: Engineering Demo <engineering@example.com>
+To: Planning Demo <planning@example.com>
+Date: Mon, 02 Nov 2026 14:00:00 +0000
+Message-ID: <demo-inspection-1@example.com>
+Subject: Demo pump inspection
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: 8bit
+
+This is a synthetic example.
+
+Inspection found a worn coupling. Please schedule a replacement and an
+alignment check before the next trial.
