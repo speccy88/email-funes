@@ -1,5 +1,12 @@
 # Changes
 
+## Installable Outlook PST converter — 2026-11-24
+
+- Added the `email-funes` console command for import, audit, recovery, stats and export, with separately installable native, RTF and Windows COM dependencies.
+- Required classification or an explicit all-record choice for the first unclassified export. Preserved existing PST provenance, selection policies and turn mappings.
+- Made import diagnostics content-free by default and protected local database, report, recovery and export paths. Added offline wheel tests, Windows/Linux checks, secret scans and optional-dependency audits.
+- Documented dedicated local Funes indexing, untrusted correspondence and the normalized message contract for future adapters.
+
 ## Metadata recovery and enriched export — 2026-11-20
 
 - Added the PST metadata audit and second-pass SQLite recovery commands to the repository.

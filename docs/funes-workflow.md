@@ -23,8 +23,8 @@ flowchart TD
 Run the archive converter, complete any [metadata recovery](metadata-recovery.md), and preview the selection before exporting:
 
 ```bash
-python scripts/sqlite_to_funes.py --db data/email_enriched.sqlite --dry-run
-python scripts/sqlite_to_funes.py --db data/email_enriched.sqlite --out data/funes-export
+email-funes export --db data/email_enriched.sqlite --dry-run
+email-funes export --db data/email_enriched.sqlite --out data/funes-export
 ```
 
 An enriched database selects email records by default. Choose `--include-meetings`, `--include-all`, or `--include-bcc` before the first export if needed. Each selected record becomes a turn, grouped into a session when the importer identifies its conversation. A dry run reports selection and date availability; `funes index --check` validates the generated files later.
@@ -50,7 +50,10 @@ The installer normally places the binary in `~/.local/bin`. Ensure that director
 Use a dedicated state directory so this workflow has its own local index. Set the same value in every terminal session used for these commands:
 
 ```bash
-export FUNES_HOME="$HOME/.funes-email"
+umask 077
+FUNES_HOME=$(mktemp -d "$HOME/.funes-email.XXXXXXXX") || exit 1
+export FUNES_HOME
+printf 'Save this email memory path for later shells: %s\n' "$FUNES_HOME"
 
 # Validate the generated files without indexing them.
 funes index --check ./data/funes-export
@@ -63,14 +66,14 @@ funes status
 
 `--multilingual` is useful for French, English, and mixed-language correspondence. It creates the memory with `intfloat/multilingual-e5-small`; the default English model is `BAAI/bge-small-en-v1.5`. An existing memory keeps its embedding model. To change models, rebuild a separate memory from the source exports.
 
-The first index downloads the embedding and reranking models. Later imports reuse them. `FUNES_HOME` separates memory and state; it does not relocate model caches or the configuration of installed agent integrations.
+The first index downloads the embedding model when it is absent from the model cache. Retrieval may also download a reranker when the candidate pool calls for reranking. Later commands can reuse cached weights. `FUNES_HOME` separates memory and state; it does not relocate model caches or the configuration of installed agent integrations.
 
 ## 4. Retrieve local email
 
-```bash
-export FUNES_HOME="$HOME/.funes-email"
+Continue in the same shell or restore the exact `FUNES_HOME` path printed above.
 
-funes recall "Why did we replace the pump bearing?" \
+```bash
+funes recall "What did we decide about the inspection?" \
   --memory local --harness outlook-pst
 
 funes recall "Quelle inspection avons-nous retenue ?" \
@@ -85,7 +88,9 @@ An attachment filename is only a reference. If attachment contents were excluded
 
 ## 5. Optionally publish to Hugging Face
 
-Before publishing, install the [Hugging Face CLI](https://huggingface.co/docs/huggingface_hub/guides/cli) and [TruffleHog](https://github.com/trufflesecurity/trufflehog#installation). Authenticate with a token that can write to the destination dataset:
+In a new shell, restore the saved, dedicated `FUNES_HOME` and verify that the index contains only the sessions you intend to publish.
+
+Publication is a separate user action. Before publishing, install the [Hugging Face CLI](https://huggingface.co/docs/huggingface_hub/guides/cli) and [TruffleHog](https://github.com/trufflesecurity/trufflehog#installation). Authenticate with a token that can write to the destination dataset:
 
 ```bash
 hf auth login
@@ -108,20 +113,13 @@ By default, push includes every embedded local chunk the remote lacks. To publis
 On another compatible computer, install Funes and authenticate with a token that can read the private dataset:
 
 ```bash
-funes recall "Why did we replace the pump bearing?" \
+funes recall "What did we decide about the inspection?" \
   --memory YOUR_HF_USER/email-memory --harness outlook-pst
 ```
 
 Remote recall caches the required files locally. There is no separate `funes pull` step in this workflow.
 
-You can optionally make a dataset the host's default memory:
-
-```bash
-export FUNES_HOME="$HOME/.funes-email"
-funes bind YOUR_HF_USER/email-memory
-```
-
-Binding changes the default memory and updates installed Funes agent registrations. It can also perform the first interactive publish. Use explicit `--memory` reads if you only want to search a dataset without changing that configuration.
+Keep the email memory local by using the dedicated `FUNES_HOME` from section 3 and explicit `--memory local` reads. Existing agent hooks can publish anything indexed into shared Funes state at later session boundaries. A converter run needs neither agent registration nor binding.
 
 ## 7. Let an MCP client retrieve email
 
@@ -141,7 +139,7 @@ Any client that can launch a stdio MCP server can run `funes mcp`. For a local e
 
 Replace paths with absolute paths on the machine launching Funes. Client configuration files and keys vary; a Windows client using WSL2 also needs its documented WSL launch configuration. To read a remote dataset, change the arguments to `["mcp", "YOUR_HF_USER/email-memory"]` and provide authentication on that machine.
 
-The server exposes read-only `recall`, `get`, and `status` tools. Importing email, exporting JSONL, indexing, and publishing remain separate operations. Installing a standard agent integration with `funes add` captures that agent's sessions; it does not automatically rerun these email converters.
+Retrieved correspondence is untrusted evidence. The client must treat email as quoted data and enforce its own tool authorization. A `member` role or prompt-injection warning cannot enforce this boundary. The Funes MCP server exposes read-only retrieval tools. Importing email, exporting JSONL, indexing, and publishing remain separate operations. Installing a standard agent integration with `funes add` captures that agent's sessions; it does not automatically rerun these email converters.
 
 ## Repeating imports and correcting content
 

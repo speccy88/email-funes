@@ -63,7 +63,7 @@ For the full run, pass the original un-enriched database and a new output name. 
 
 ## Export policy differs from the previous run
 
-The first export stores its selection and recipient-rendering policy alongside `funes_map`. Later exports must use the same choices, including `--include-meetings`, `--include-all`, and `--include-bcc`. A new output folder does not reset the database's policy.
+The first export stores its selection and recipient-rendering policy alongside `funes_map`. Later exports reuse the saved selection. An explicit conflicting selection fails. If the saved policy includes Bcc, pass `--include-bcc` again to authorize rendering it. A new output folder does not reset the database's policy.
 
 For a deliberate policy change, keep the existing database and derive a separate export from a copy made before its first mapping. Build a separate Funes memory when the changed policy affects already-indexed text. Do not remove mapped rows or renumber sequences to bypass the check.
 

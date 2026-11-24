@@ -6,7 +6,8 @@ New importers should write the shared SQLite model. That keeps Funes export, mes
 
 | File | Responsibility |
 | --- | --- |
-| `scripts/<format>_to_sqlite.py` | Parse source records, normalize metadata, provide a CLI |
+| `scripts/email_funes/adapters.py` | Dispatch `email-funes import --format` and expose supported readers |
+| `scripts/<format>_to_sqlite.py` | Parse source-specific records and normalize metadata |
 | `scripts/email_funes_common.py` | Shared `Message` record, SQLite storage, filters, fingerprinting, and search |
 | `scripts/sqlite_to_funes.py` | Apply a stable selection/rendering policy and export Funes records |
 | `tests/test_<format>.py` | Synthetic extraction and failure-case tests |
@@ -47,9 +48,23 @@ Use the complete [SQLite schema](sqlite-schema.md) for required fields. Keep sou
 
 ## Thread and producer identity
 
-Use stable message IDs and thread roots. Subject text alone is insufficient: two unrelated messages can have the same subject. Do not renumber exported turns or recalculate existing thread IDs after a memory has been indexed.
+When multiple archives feed one database, `source_items` records each occurrence, while the fingerprint identifies matching extracted messages. Identically named mailboxes in different directories can contain different mail. The direct PST reader keeps its historical path/folder/position keys and guards positions with a size and modification-time baseline. Keep the same unchanged original at that path. These attributes are continuity checks, not content authentication.
 
-The current shared exporter labels records `outlook-pst`. When adding another source, extend its producer selection deliberately (for example a persisted source column and a compatible migration), rather than silently labeling all formats as PST. Keep existing producers, `funes_map` identities, and export policies stable. Recipient-rendering changes can alter indexed text even when the body is unchanged. The experimental direct EML script is historical code, not the template for incremental synchronization.
+For a new adapter, namespace its source occurrence IDs by format and archive identity. Freeze the source snapshot when offsets or indexes participate in the key. Keep stable message IDs and thread roots. Subject lines can repeat across unrelated conversations. Extend the dispatch table only after the reader, tests and installation instructions are ready. Keep native dependencies inside the selected reader.
+
+The shared exporter's existing producer label is `outlook-pst`. A future adapter needs a deliberate persisted producer/provenance policy for new and duplicate records, including messages shared across formats. Add a versioned transactional migration with old-database and mapping tests if new columns are needed. Existing PST assignments and rendered content must remain stable. A recovery or rendering change can require a rebuild of the derived memory.
+
+Sequence numbers belong to the database's persistent `funes_map`. Import all related snapshots into one database before exporting a combined memory. Independent databases can assign the same sequence number to different messages in a shared conversation. Combine independent exports only after verifying agreement on producer, session, sequence, turn UUID and rendered content, or index them in separate memories.
+
+## Next adapters
+
+| Planned adapter | First implementation step |
+| --- | --- |
+| EML | Share MIME parsing with the experimental snapshot exporter where appropriate. Write normalized messages and per-file provenance through the SQLite writer. Include repeated Message-IDs and duplicate filenames in tests. |
+| MBOX | Stream messages from each fixed archive, using an immutable snapshot identity to guard per-message offsets on resume. Test rewrites and truncated records. |
+| Maildir | Track each mailbox and message occurrence across `new/` and `cur/`. Test renames, flag suffixes and identical filenames in separate mailboxes. |
+
+The experimental `scripts/eml_to_funes.py` still exports a standalone JSONL snapshot. The public CLI's SQLite import currently accepts PST.
 
 ## Tests that matter
 

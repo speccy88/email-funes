@@ -17,12 +17,19 @@
 *.db-*
 *.funes.jsonl
 *.errors.txt
+*.errors-*.txt
 *.log
 *.tmp
 .email-funes-export-*/
 
 # Only reviewed, synthetic mail fixtures belong in version control.
-!examples/eml/*.eml
+!examples/eml/001-inspection.eml
+!examples/eml/002-reply.eml
+
+# Wheel build outputs.
+/build/
+/dist/
+*.egg-info/
 
 # Python and local tools.
 __pycache__/

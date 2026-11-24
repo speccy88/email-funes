@@ -4,7 +4,7 @@
 
 The goal is to retrieve project correspondence later: decisions, technical discussions, supplier responses, and the context behind completed work. SQLite keeps an inspectable copy of the extracted text and metadata. Funes adds semantic retrieval for an assistant or agent.
 
-[Quick start](#quick-start-pst-to-sqlite) · [Metadata recovery](docs/metadata-recovery.md) · [Funes setup](docs/funes-workflow.md) · [Converter reference](docs/converters.md) · [Adding a format](docs/adding-converters.md)
+[Install and compatibility](#install-and-compatibility) · [Quick start](#quick-start) · [Metadata recovery](docs/metadata-recovery.md) · [Funes setup](docs/funes-workflow.md) · [Converter reference](docs/converters.md) · [Adding a format](docs/adding-converters.md)
 
 ## How it works
 
@@ -49,93 +49,104 @@ MAPI is Outlook's internal property model. Some messages have useful sender, rec
 | EML → Funes JSONL | Experimental snapshot shortcut | Python standard library |
 | EML / MBOX / Maildir → SQLite | Planned | Future converters will use the same SQLite contract |
 
-## Quick start: PST to SQLite
+## Install and compatibility
 
-Run these commands in **PowerShell**, from the repository folder. Keep the PST outside the repository and close Outlook if it has that archive open.
+Install from a checkout of this repository. Cloning a private checkout requires GitHub read access. The base package uses Python 3.10+ with SQLite FTS5 and has no runtime package dependencies. The native readers are separate extras.
 
-### 1. Get the code and install the reader
+**PowerShell**
 
 ```powershell
 git clone https://github.com/speccy88/email-funes.git
 cd email-funes
-python -m pip install --only-binary=:all: -r requirements/pst.txt
-python -c "import pypff; print(pypff.get_version())"
+py -3.12 -m venv .venv
+.\.venv\Scripts\python -m pip install --only-binary=:all: ".[pst,rtf]"
+$env:Path = "$(Resolve-Path .venv\Scripts);$env:Path"
+email-funes --help
 ```
 
-The package is **`libpff-python`**; the import name is **`pypff`**. A compatible wheel must exist for your Python version and platform. See [installation troubleshooting](docs/troubleshooting.md).
+**POSIX shell**
 
-### 2. Import a sample, then the complete archive
+```sh
+git clone https://github.com/speccy88/email-funes.git
+cd email-funes
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install --only-binary=:all: ".[pst,rtf]"
+email-funes --help
+```
 
-Replace the PST path with your own:
+| Component | Requirements and scope |
+| --- | --- |
+| CLI, SQLite stats, selection and JSONL export | Install with `python -m pip install .`. Existing script entry points also work from a checkout. |
+| Direct PST import, audit and recovery | `pst` installs `libpff-python==20261030` (import name `pypff`). Match the CPython version, CPU and operating system to a published wheel. Windows, macOS and Linux have different wheel tags. [Wheel list](https://pypi.org/project/libpff-python/20261030/#files) |
+| Optional RTF recovery | `rtf` installs `striprtf==0.0.35`. Pass `--recover-rtf` to recovery to use it. |
+| Alternative first-pass importer | On Windows, install `".[outlook]"` for `pywin32==312`. Choose `--backend outlook` with Outlook Classic and a configured profile. Outlook can mount the PST and modify its metadata. Audit and positional recovery use the direct reader's occurrence keys. |
+| Funes CLI | Separate install. Funes publishes Linux x86-64/ARM64 and Apple Silicon macOS binaries. On Windows use WSL2 for the Funes steps. [Upstream platform list](https://github.com/huggingface/funes#get-funes) |
+
+Exit status 0 indicates success. Check the event counts on a nonzero exit. Import, audit and recovery can return 2 after individual record errors, with a partial result available for inspection. Usage and selection refusals also return 2. Fatal errors return nonzero and an interrupted import returns 130.
+
+## Quick start
+
+Keep the original PST closed in Outlook. Use its same absolute path and unchanged contents throughout import and recovery. Keep the working files in a private local directory with sufficient space for two databases, the export and the derived index.
+
+**PowerShell** on the conversion machine. Substitute the path of your own local PST. The audit is optional. Use fresh output names for each audit, recovery and export.
 
 ```powershell
-python scripts/pst_to_sqlite_direct.py --pst "C:\MailArchives\archive.pst" --db data/email.sqlite --limit 100
-python scripts/pst_to_sqlite_direct.py --db data/email.sqlite --stats
-python scripts/pst_to_sqlite_direct.py --db data/email.sqlite --search "motor OR inspection"
+$pst = 'C:\MailArchives\archive.pst'
+$work = Join-Path $env:LOCALAPPDATA 'email-funes'
+email-funes import "$pst" --format pst --db "$work\email.sqlite"
+email-funes stats --db "$work\email.sqlite"
+email-funes audit --pst "$pst" --db "$work\email.sqlite" --out "$work\audit.log"
+email-funes recover --pst "$pst" --db "$work\email.sqlite" --out-db "$work\email-enriched.sqlite" --log "$work\recovery.log" --recover-rtf
+email-funes export --db "$work\email-enriched.sqlite" --dry-run
+email-funes export --db "$work\email-enriched.sqlite" --out "$work\funes-export"
 ```
 
-Inspect sample bodies, dates, and filenames. Then run the same import without `--limit`:
+**POSIX shell** on a conversion machine with a matching parser wheel. Choose this sequence or the PowerShell sequence for a given PST.
 
-```powershell
-python scripts/pst_to_sqlite_direct.py --pst "C:\MailArchives\archive.pst" --db data/email.sqlite
+```sh
+umask 077
+pst="$HOME/MailArchives/archive.pst"
+work="$HOME/email-funes-work"
+email-funes import "$pst" --format pst --db "$work/email.sqlite"
+email-funes stats --db "$work/email.sqlite"
+email-funes audit --pst "$pst" --db "$work/email.sqlite" --out "$work/audit.log"
+email-funes recover --pst "$pst" --db "$work/email.sqlite" --out-db "$work/email-enriched.sqlite" --log "$work/recovery.log" --recover-rtf
+email-funes export --db "$work/email-enriched.sqlite" --dry-run
+email-funes export --db "$work/email-enriched.sqlite" --out "$work/funes-export"
 ```
 
-Completed source entries are skipped. Keep the PST unchanged between runs. `--limit` counts inspected items, including previously imported and filtered items; it does not select the newest messages.
+**Synthetic alternative** from the installed checkout, in either shell. The demo makes five invented records, including a meeting and an appointment. The default export contains three email turns across two threads.
 
-### 3. Check and recover missing metadata
-
-The audit reads the PST and SQLite without modifying either. Its default sample covers each folder:
-
-```powershell
-python scripts/pst_metadata_audit.py --pst "C:\MailArchives\archive.pst" --db data/email.sqlite --out data/pst_metadata_audit.log
+```sh
+python examples/create_demo_db.py --db data/demo-enriched.sqlite --enriched
+email-funes export --db data/demo-enriched.sqlite --dry-run
+email-funes export --db data/demo-enriched.sqlite --out data/demo-funes
 ```
 
-For recovery with optional RTF body decoding:
+### Validate, index and recall
 
-```powershell
-python -m pip install --only-binary=:all: -r requirements/recovery.txt
-python scripts/pst_sqlite_recover.py --pst "C:\MailArchives\archive.pst" --db data/email.sqlite --out-db data/email_enriched.sqlite --log data/pst_recovery.log --recover-rtf
+Run this part in a POSIX shell with Funes installed. Set `export_dir` to the export you just created. For the synthetic example, use `export_dir="$PWD/data/demo-funes"`. From WSL2, the PowerShell example typically lives under `/mnt/c/Users/<Windows user>/AppData/Local/email-funes/funes-export`.
+
+```sh
+export_dir="$HOME/email-funes-work/funes-export"
+umask 077
+# Create a dedicated email memory for the first index. Save the printed path for later use.
+FUNES_HOME=$(mktemp -d "$HOME/.funes-email.XXXXXXXX") || exit 1
+export FUNES_HOME
+printf 'Email memory directory: %s\n' "$FUNES_HOME"
+funes index --check "$export_dir"
+funes index --multilingual "$export_dir"
+funes recall "What did we decide about the inspection?" --memory local --harness outlook-pst
 ```
 
-Recovery writes a **new enriched copy** and an aggregate log. It fills blank fields, classifies Outlook items, and records To/Cc/Bcc recipients with their source metadata. Existing message identities and thread assignments stay stable. The output database must not already exist.
+On subsequent runs set `FUNES_HOME` to that saved directory. A fresh index uses English embeddings by default. `--multilingual` creates it with `intfloat/multilingual-e5-small`. The memory keeps its initial model. File and directory indexing read `outlook-pst` from the turns themselves. Only recall takes the harness filter here.
 
-Use the same original PST path and unchanged archive as the first import: this workflow matches source occurrences by path, folder, and item position. The [recovery guide](docs/metadata-recovery.md) covers full audits, small recovery tests, unresolved fields, and moving work between Windows and Linux.
+Each recovery scans one unchanged direct-imported PST. In a database with several archives, unmatched items can remain unclassified and the email-only export omits them. Compare selected counts before indexing.
 
-### 4. Preview and export the selected messages
+Complete recovery **before first indexing**. Funes derives chunk identity from session, turn and block position. Re-emitting revised text under the old identity cannot update an indexed passage. Preserve the database's mapping and policy for incremental exports. Corrections require explicit new versions or a fresh derived memory built from a coherent export. [Export state](docs/converters.md#stable-export-state)
 
-Start with a read-only preview:
-
-```powershell
-python scripts/sqlite_to_funes.py --db data/email_enriched.sqlite --dry-run
-```
-
-Then create the export:
-
-```powershell
-python scripts/sqlite_to_funes.py --db data/email_enriched.sqlite --out data/funes-export
-```
-
-An enriched database exports **email records by default**. Add `--include-meetings` to include meeting messages, or `--include-all` to include every item category. Bcc recipients are omitted unless you choose `--include-bcc`. A database without recovery classification retains the earlier all-record export behavior and prints a notice.
-
-Choose these options before the first export. The database retains both the export policy and stable turn assignments; later runs reject a conflicting policy. Use a **new or empty output folder** for each snapshot. See [export behavior](docs/converters.md#sqlite-to-funes) for details.
-
-Prefer an example first? The [synthetic demo](examples/README.md) needs neither Outlook nor a PST file.
-
-## Index and retrieve with Funes
-
-Use Linux, WSL2, or Apple Silicon macOS with Funes installed. Copy the JSONL folder there, or access it through `/mnt/c/...` under WSL2. The [Funes guide](docs/funes-workflow.md) covers installation and paths.
-
-```bash
-export FUNES_HOME="$HOME/.funes-email"
-
-funes index --check /path/to/funes-export
-funes index --multilingual /path/to/funes-export
-funes recall "What did we decide about the pump inspection?" --memory local --harness outlook-pst
-```
-
-Choose `--multilingual` on the first index for French and English correspondence. Keep the same `FUNES_HOME` for subsequent commands.
-
-You can optionally publish the indexed memory to a Hugging Face **dataset** using `funes push YOUR_HF_USER/email-memory`. Publication includes email text and requires Hugging Face authentication and TruffleHog. See [publication and MCP access](docs/funes-workflow.md#5-optionally-publish-to-hugging-face).
+The community integration supplies the turns format. Install it from this repository. A community listing gives it no catalog alias. The second positional argument of `funes add` names a memory. A managed email bundle would be a separate project if repeated installation, setup or automation later needs one.
 
 ## What is kept and filtered
 
@@ -150,6 +161,10 @@ You can optionally publish the indexed memory to a Hugging Face **dataset** usin
 | Newsletters | Kept unless `--skip-bulk` is chosen |
 | Calendar, contact, task, and other Outlook objects | Identified by recovery; excluded from the enriched default export |
 | Quoted replies and signatures | Kept; text cleanup is planned |
+
+An enriched database selects email by default. For the first export of a database without classification, recover first or explicitly choose `--include-all`. Export omits Bcc headers by default. SQLite may retain Bcc, and quoted bodies can still contain those addresses.
+
+SQLite, JSONL and the derived index contain readable correspondence. Use a private working directory. Treat retrieved mail as untrusted quoted evidence. The consuming agent must keep it separate from trusted instructions and tool authorizations. Other agent hooks can later publish an index if you use shared Funes state. [Security and reporting](SECURITY.md) · [Funes workflow](docs/funes-workflow.md)
 
 Attachment filenames provide references; they do not make the documents' contents searchable. Attachment bytes are not compared during deduplication. Retain the PST as the complete original archive.
 
@@ -175,9 +190,9 @@ python -m unittest discover -s tests -v
 
 GitHub Actions runs offline tests and the synthetic workflow on Windows and Linux. Native PST extraction still needs validation against the actual archive and its error log; synthetic tests do not establish complete support for every PST variant.
 
-Planned work includes EML/MBOX/Maildir importers through SQLite, stronger thread reconstruction, optional body cleaning, and controlled incremental synchronization.
+The [verification record](docs/compatibility.md) lists the upstream commits, platform checks, dependency notices and open license decision.
 
-Funes uses stable turn identities. Editing text under an existing ID does not replace its indexed content, and deleting a SQLite row does not delete Funes history. Complete recovery before the first index; handle later corrections as explicit versions or a rebuild of the derived memory.
+The next adapter candidates are EML, MBOX and Maildir. Each needs normalized messages, stable source provenance and fixtures before it can be supported. [Adapter contract](docs/adding-converters.md)
 
 The repository contains code, documentation, and synthetic examples. Email archives, databases, generated exports, logs, and credentials are ignored by Git.
 

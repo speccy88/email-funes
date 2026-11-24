@@ -1,19 +1,18 @@
 # Converter reference
 
-Run commands from the repository root. The main sequence is a source reader, SQLite, optional metadata recovery, then the shared Funes exporter.
+Install the CLI from the source checkout. The original scripts remain available for compatibility. [Installation and compatibility](../README.md#install-and-compatibility)
 
 ## Direct PST reader
 
 ```powershell
-python -m pip install --only-binary=:all: -r requirements/pst.txt
-python scripts/pst_to_sqlite_direct.py --pst "C:\MailArchives\archive.pst" --db data/email.sqlite --limit 100
+email-funes import "C:\MailArchives\archive.pst" --format pst --db data/email.sqlite --limit 100
 ```
 
 The reader uses `pypff`, provided by the official [`libpff-python`](https://pypi.org/project/libpff-python/) package. It opens the PST directly. It does not call Outlook, send mail, or upload content.
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `--pst PATH` | Required for import | Existing PST archive |
+| `ARCHIVE` | Required for import | Existing PST archive (the original script uses `--pst PATH`) |
 | `--db PATH` | Required | SQLite destination |
 | `--limit N` | `0` | Maximum inspected items; `0` means all |
 | `--batch-size N` | `250` | Commit completed records every N inspected items |
@@ -23,9 +22,9 @@ The reader uses `pypff`, provided by the official [`libpff-python`](https://pypi
 | `--include-header-spam` | Off | Keep messages marked by explicit spam rules |
 | `--skip-bulk` | Off | Exclude List-Id, List-Unsubscribe, and bulk/list Precedence messages |
 | `--max-body-chars N` | `0` | Optional storage truncation; `0` retains the full extracted body |
-| `--stats` | Off | Show database counts |
-| `--search QUERY` | None | Search using SQLite FTS5 syntax |
-| `--results N` | `15` | Maximum search results |
+| `--private-diagnostics` | Off | Include private location and exception details in the local import error log |
+
+Use `email-funes stats --db data/email.sqlite` for read-only counts. The compatibility script also accepts `--stats`, `--search QUERY`, and `--results N` (default 15). Search displays matching email content.
 
 Folder names are normalized for English and French names. Folder filtering also excludes their descendants. Deleted Items is a separate choice from spam; include it if deleted correspondence belongs in your project history.
 
@@ -43,15 +42,14 @@ Filtered items are counted but not stored as email rows or durable exclusion rec
 
 ### Error handling
 
-Individual extraction errors are recorded beside the database in `*.direct.errors.txt`. The importer continues where possible, reports missing key fields, and returns a nonzero exit code when extraction errors occur. A normal Ctrl+C commits completed records and returns 130.
+On an extraction error the direct reader writes a local log beside the database, using `*.direct.errors.txt` or a fresh suffixed filename if a previous log exists. Default diagnostics contain event labels, counts and exception types. Add `--private-diagnostics` for a private error log with location and exception details. Keep these private logs out of public issue reports. The importer continues past individual unreadable records and returns a nonzero status on extraction errors. Ctrl+C commits completed records and returns 130.
 
 For a clean import using different filter or truncation settings, create a new database. Existing rows are not rewritten by changing command-line flags.
 
 ## Outlook Classic alternative
 
 ```powershell
-python -m pip install -r requirements/outlook.txt
-python scripts/pst_to_sqlite.py --pst "C:\MailArchives\archive.pst" --db data/outlook-com.sqlite --limit 100
+email-funes import "C:\MailArchives\archive.pst" --format pst --backend outlook --db data/outlook-com.sqlite --limit 100
 ```
 
 This Windows-only adapter uses Outlook Classic's COM object model. It needs a usable Outlook profile. The new Outlook application does not supply this interface. Open Outlook Classic and the PST manually if the adapter reports that it is not connected.
@@ -63,19 +61,23 @@ This adapter is retained for compatibility with the initial scripts. It may temp
 Use `pst_metadata_audit.py` to measure native property coverage and `pst_sqlite_recover.py` to enrich a fresh copy of an existing import. These commands share the `pypff` dependency. Recovery can also decode RTF text with optional `striprtf`.
 
 ```powershell
-python scripts/pst_metadata_audit.py --pst "C:\MailArchives\archive.pst" --db data/email.sqlite --out data/audit.log --full
-python scripts/pst_sqlite_recover.py --pst "C:\MailArchives\archive.pst" --db data/email.sqlite --out-db data/email_enriched.sqlite --log data/recovery.log --recover-rtf
+email-funes audit --pst "C:\MailArchives\archive.pst" --db data/email.sqlite --out data/audit.log --full
+email-funes recover --pst "C:\MailArchives\archive.pst" --db data/email.sqlite --out-db data/email_enriched.sqlite --log data/recovery.log --recover-rtf
 ```
 
 The original PST path and immutable snapshot are part of source matching. Recovery does not add filtered source items or rewrite existing message identities. It adds item classification, structured recipients, recovered fields, and provenance to the copy. Its aggregate log contains no message text or addresses.
+
+Choose fresh paths for both reports and the enriched database. Audit reports sample counts and labels folders with opaque identifiers. Recovery uses the native direct reader's occurrence keys. Outlook COM imports use a different occurrence identity.
+
+Several immutable PSTs may feed one first-pass SQLite database. Recovery currently accepts **one PST per fresh copy**. In a database containing several PSTs, records exclusive to other archives stay unclassified and are excluded by email-only selection. An enriched copy cannot be used as the input for a second recovery pass. For full metadata recovery across independent archives, recover each in its own database and use separate Funes memories if conversations overlap.
 
 See the [metadata recovery guide](metadata-recovery.md) for dependencies, flags, pilot runs, source checks, and limitations.
 
 ## SQLite to Funes
 
 ```powershell
-python scripts/sqlite_to_funes.py --db data/email_enriched.sqlite --dry-run
-python scripts/sqlite_to_funes.py --db data/email_enriched.sqlite --out data/funes-export
+email-funes export --db data/email_enriched.sqlite --dry-run
+email-funes export --db data/email_enriched.sqlite --out data/funes-export
 ```
 
 The exporter uses only the Python standard library. Preview is read-only: it reports category, selection, missing-date, and existing-mapping counts without producing JSONL or changing SQLite. It checks policy compatibility but does not fully validate message content or timestamp syntax.
@@ -94,9 +96,9 @@ The exporter uses only the Python standard library. Preview is read-only: it rep
 
 When recovery classification exists, the default selects the `Email / IPM.Note` category. `--include-meetings` also selects `Meeting request`, which covers meeting-message subclasses such as invitations and responses. Appointments, contacts, tasks, notes, and unclassified records require `--include-all`.
 
-Without recovery classification, the exporter retains the earlier all-record behavior and prints a notice. Use recovery to obtain an email-only selection based on native message classes.
+The first preview or export of an unclassified database requires a selection decision. Run recovery for email-only selection, or pass `--include-all` to count or export every retained Outlook item, including contacts and calendar entries. A compatible earlier all-record policy or populated legacy mapping supplies that decision on later runs.
 
-Normalized recipient rows take precedence over the original flattened To/Cc text. If a recipient type has no normalized rows, the exporter uses the original field where available. Existing but empty typed rows do not fall back to an older display list. It retains unresolved display names rather than inventing an address. Bcc is opt-in because its inclusion changes the searchable content.
+Normalized recipient rows take precedence over the original flattened To/Cc text. If a recipient type has no normalized rows, the exporter uses the original field where available. Existing but empty typed rows do not fall back to an older display list. Unresolved recipients keep their display names. Recovered Bcc is retained locally in SQLite. Export omits the Bcc field by default. An address quoted in a body or appearing elsewhere in the message remains in the text.
 
 Only the selected records receive new Funes mappings. Records with neither a sent nor a received date stay in SQLite and are skipped; timestamps are never invented. Records with an empty body can still provide searchable subjects, participants, dates, and attachment filenames.
 
@@ -109,13 +111,13 @@ A normal export adds two tables to SQLite:
 
 Back up these tables together with the messages. Later-discovered emails append to their session's sequence even when their timestamp is older. Files can contain several sessions, and a session can span files.
 
-The exporter rejects a different policy or an existing mapping that conflicts with the selected records. It does not renumber already assigned turns. An older mapping without a policy can be adopted only when its legacy rendering and selection behavior are preserved. An enriched database with an earlier legacy mapping needs a deliberate fresh export state.
+Omit selection flags to reuse the saved selection. A database exported with Bcc requires `--include-bcc` again on every preview or export. A conflicting selection, Bcc choice, or incompatible schema fails before publication. A populated older mapping without a policy can continue under its original unclassified, all-record rendering. Enriching an already mapped legacy database changes the rendering inputs and requires a deliberate rebuild.
 
 If a policy change is necessary, preserve the existing database/export and start from a separate copy of the archive taken **before its first mapping**. Use a separate derived Funes memory for a rebuild. Do not delete mapping rows in a published workflow to force the command through: that can shift sequences or retain old indexed content under reused identities.
 
 ### Output and validation
 
-The output must be new or empty. The exporter stages the entire snapshot, validates essential fields, and publishes the directory after success. A failed export does not expose a partial final snapshot. Use a new folder name on the next run; unchanged turn identities let Funes deduplicate re-emitted records.
+Choose a new or empty directory in a private parent directory. The exporter stages and validates the complete snapshot, commits its mappings, then publishes the directory with a rename. Rendering errors roll back new assignments and remove staging files. If the final rename fails after the commit, the database retains valid assignments for a retry. A new snapshot folder can reuse those IDs.
 
 Invalid mapped timestamps, malformed attachment filename arrays, or non-dense sequences fail the export. It uses `role: member` and `harness: outlook-pst`; email metadata stays inside one text block. The `role` field is not a sender address, and no undocumented top-level JSON fields are added.
 

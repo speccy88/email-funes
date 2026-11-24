@@ -148,6 +148,8 @@ Selection is applied **before** assigning new sequences. Excluded Outlook object
 
 Later exports must preserve that policy and the mapping. A late arrival receives the next sequence number. Editing text under an existing identity does not replace indexed content, and removing mapped records can create invalid gaps. Treat a changed selection or rendering strategy as a deliberate new derived export/index. See [export state and rebuilds](converters.md#stable-export-state).
 
+Permanent sequences belong to the database that assigned them. Two independently built databases can contain different turns from the same email thread, each assigned `seq = 0`. The same message in both databases can also yield the same chunk identity and be deduplicated by Funes. Combining overlapping exports requires a shared mapping built before indexing, or separate memories. Comparing only filenames or producer labels cannot establish independence. See the [single-PST recovery limitation](converters.md#pst-metadata-audit-and-recovery) when planning a multi-archive import.
+
 ## Useful queries
 
 These queries inspect counts without displaying private message content:

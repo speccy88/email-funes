@@ -1,0 +1,27 @@
+# Compatibility and verification
+
+The implementation was based on email-funes `365a1bc4e9012ed9e55a50b9446011764adf0445` on the repository's default branch. The installed entry point and the retained scripts use the same storage, recovery and export functions. No base SQLite schema migration is required for the CLI. Re-exporting the base revision's synthetic legacy and enriched databases produced byte-identical JSONL. The verification compared the message rows, source occurrences, `funes_map` and serialized policy before and after the export.
+
+## Funes contract
+
+Reviewed on 2026-11-24 against Funes [`9d61052`](https://github.com/huggingface/funes/tree/9d610523e0517500befd841d568f37a425cefc2a) and funes-integrations [`3060e45`](https://github.com/huggingface/funes-integrations/blob/3060e451a87366b8467268ff5c5893a098976e4b/COMMUNITY.md). The reviewed Funes documents cover [external producers](https://github.com/huggingface/funes/blob/9d610523e0517500befd841d568f37a425cefc2a/CONTRIBUTING.md#writing-an-integration), [turns](https://github.com/huggingface/funes/blob/9d610523e0517500befd841d568f37a425cefc2a/docs/funes-jsonl.md), [indexing](https://github.com/huggingface/funes/blob/9d610523e0517500befd841d568f37a425cefc2a/docs/index.md), [installation](https://github.com/huggingface/funes/blob/9d610523e0517500befd841d568f37a425cefc2a/docs/add.md) and [configuration](https://github.com/huggingface/funes/blob/9d610523e0517500befd841d568f37a425cefc2a/docs/configuration.md). The invitation to submit a link appears in [issue 299](https://github.com/huggingface/funes/issues/299#issuecomment-7129336682).
+
+Funes 1.12.0 on WSL2 Ubuntu x86-64 validated the enriched synthetic demo with three turns, three chunks, zero rejected files and zero duplicate IDs. First indexing embedded three chunks across two sessions with `intfloat/multilingual-e5-small`. Local recall filtered by `outlook-pst` returned the worn coupling and the decision to replace it and check alignment. The test used temporary state and a separate model cache. The [quick start](../README.md#quick-start) reproduces the sequence.
+
+## Release checks
+
+To run the checks from a checkout, use `python -m unittest discover -s tests -v`, build with `python -m pip wheel --no-deps --wheel-dir dist .`, then run `python tests/smoke_wheel.py dist`. The opt-in `tests/test_funes_contract.py` also runs a real check when `EMAIL_FUNES_TEST_BIN` names an absolute binary. Set `EMAIL_FUNES_TEST_RECALL=1` to include the multilingual index and recall with temporary OS home and memory. `EMAIL_FUNES_TEST_MODEL_CACHE` can name a dedicated model cache.
+
+Windows CPython 3.12.10 ran 96 tests with three skips (two POSIX mode checks and the WSL-only Funes run on this host). WSL2 Ubuntu 26.04 x86-64 on CPython 3.14.4 passed all 96, including the opt-in real Funes test. Linux CPython 3.10.22 passed 95 with only the opt-in Funes test skipped. Clean-wheel tests also passed on Windows 3.14.8. The offline suite exercises the readers with synthetic objects. A clean Windows CPython 3.12.10 environment installed the wheel outside the checkout and ran help, stats, preview and export before any optional reader was installed. A separate installation imported the native and COM modules and decoded synthetic RTF. Real Outlook profile behavior, native macOS execution and acceptance against a representative PST corpus require separate testing. The project does not ship an email archive.
+
+Gitleaks 8.30.1 found no leaks in the available Git history and proposed tree. pip-audit 2.10.1 reported no known advisories in the resolved Windows build and optional dependency set, including the three reader/decoder extras. The dependency job uses pip-audit against the build backend, its resolved dependencies and the optional packages on Windows and Linux, including the Windows-only pywin32 requirement on Windows. These lookups cover published Python package advisories. They provide no independent audit of the C implementation or of every component inside a binary wheel.
+
+## License decision
+
+The repository currently has no project license. Public access and permission to redistribute are separate owner decisions. A proposed choice for the original Python code and documentation is MIT. The owner should confirm rights and attribution before granting it. Installing the converter wheel installs project Python code and metadata. It contains no vendored parser, Funes executable, decoder or COM library.
+
+| Separately installed dependency | Distribution considerations |
+| --- | --- |
+| libpff-python 20261030 | The libpff library and pypff binding source carry LGPL-3.0-or-later. The inspected native wheel includes COPYING and COPYING.LESSER. Anyone redistributing the native code must account for corresponding source, notices and applicable replacement/relinking requirements. [Release files](https://pypi.org/project/libpff-python/20261030/#files) · [LGPLv3](https://www.gnu.org/licenses/lgpl-3.0.html) |
+| striprtf 0.0.35 | BSD-3-Clause. Retain the notice, conditions and disclaimer on redistribution and observe the non-endorsement condition. [Release](https://pypi.org/project/striprtf/0.0.35/) |
+| pywin32 312 | The wheel includes component-specific licenses, including BSD-style COM/Win32 notices, an MIT MAPI component and LGPL-2.1 terms for adodbapi. Preserve and review the applicable bundled notices before redistributing those components. [Release](https://pypi.org/project/pywin32/312/) |

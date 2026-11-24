@@ -28,7 +28,11 @@ Use the **same unchanged PST and the same path used for the original import**. A
 
 The scripts can run wherever their dependencies are available, but an archive first imported at a Windows path should normally be recovered on that Windows machine. Copying the file to a Linux path changes the source key. You can move the resulting enriched SQLite database to Linux for preview, JSONL export, and Funes indexing; those stages no longer need the PST.
 
+The original importer accepts PST timestamps in the existing 1970–2100 range. Values outside it stay missing, and a message lacking both sent and received dates stays in SQLite.
+
 File size and modification time checks detect ordinary source changes. They are not a cryptographic proof that the archive is identical. Older databases may lack an original `import_sources` baseline; read the warning and retain the original archive.
+
+A recovery run takes **one** direct-imported PST and copies the whole input database. If the database combines multiple PSTs, records unique to other PSTs remain unclassified in this copy. The email-only export omits those records. Review matched and selected counts. Multi-pass enrichment into the same output is unsupported.
 
 Stop any program that is writing to the PST or SQLite before starting. Recovery uses SQLite's backup API to copy the source database, including a consistent database view.
 
