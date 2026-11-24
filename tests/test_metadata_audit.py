@@ -1,5 +1,4 @@
 """Offline tests. No real PST, pypff binary, mailbox, or external data needed."""
-import importlib.util
 import contextlib
 import io
 from pathlib import Path
@@ -9,11 +8,10 @@ import tempfile
 import unittest
 from contextlib import closing
 import os
+import sys
 
-MODULE = Path(__file__).resolve().parents[1]/'scripts/pst_metadata_audit.py'
-spec = importlib.util.spec_from_file_location('audit', MODULE)
-audit = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(audit)
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
+import pst_metadata_audit as audit
 
 class Entry:
     def __init__(self, pid, value, vt=0x001f):
@@ -153,5 +151,15 @@ class AuditTests(unittest.TestCase):
                 audit.main(['--pst',str(pst),'--out',str(output)])
             self.assertEqual(error.exception.code,2)
             self.assertEqual(pst.read_bytes(),b'unchanged source')
+
+    def test_report_cannot_create_directory_at_reserved_db_sidecar(self):
+        with tempfile.TemporaryDirectory() as td:
+            pst = Path(td) / 'archive.pst'
+            pst.touch()
+            db = Path(td) / 'db.sqlite'
+            reserved = Path(str(db) + '-journal')
+            with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+                audit.main(['--pst',str(pst),'--db',str(db),'--out',str(reserved / 'report.log')])
+            self.assertFalse(reserved.exists())
 
 if __name__=='__main__': unittest.main()

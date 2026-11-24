@@ -27,6 +27,8 @@ from pathlib import Path
 import re
 import sys
 
+from email_funes_files import FileSafetyError, diagnostic, new_private_text, staged_directory
+
 MSG_ID = re.compile(r"<([^<>\s]+)>")
 
 
@@ -180,7 +182,9 @@ def convert(src: Path, dst: Path, limit: int | None, subject_filter: str | None,
             max_chars: int) -> int:
     paths = sorted(p for p in src.rglob("*") if p.is_file() and p.suffix.lower() == ".eml")
     if not paths:
-        raise SystemExit(f"No .eml files found in: {src}")
+        raise FileSafetyError("No .eml files found under the source directory.")
+    if src.resolve() == dst.resolve():
+        raise FileSafetyError("Source and output directories must differ.")
     search = re.compile(subject_filter, re.IGNORECASE) if subject_filter else None
     data = []
     failed = 0
@@ -192,7 +196,7 @@ def convert(src: Path, dst: Path, limit: int | None, subject_filter: str | None,
             data.append(item)
         except Exception as exc:
             failed += 1
-            print(f"WARNING: cannot parse {path}: {exc}", file=sys.stderr)
+            print(diagnostic("eml.parse", exc), file=sys.stderr)
     data.sort(key=lambda x: (x["date"], x["id"], x["source"]))
     if limit:
         data = data[-limit:]  # pilot uses the newest N messages
@@ -215,34 +219,27 @@ def convert(src: Path, dst: Path, limit: int | None, subject_filter: str | None,
     for item in data:
         groups[uf.find(f"mid:{item['id']}")].append(item)
 
-    if dst.exists() and (not dst.is_dir() or any(dst.iterdir())):
-        raise SystemExit(f"Output directory already contains .funes.jsonl files: {dst}. Use an empty output folder.")
-    dst.mkdir(parents=True, exist_ok=True)
     written = 0
-    for root_key, messages in groups.items():
-        # A deterministic ID for the snapshot. New earlier messages in later
-        # imports might require changing it; use a persistent mapping for sync.
-        session_id = "pst-" + sha(root_key)[:24]
-        out = dst / f"{session_id}.funes.jsonl"
-        temporary = out.with_suffix(".tmp")
-        with temporary.open("w", encoding="utf-8", newline="\n") as f:
-            for seq, item in enumerate(messages):
-                turn = {
-                    "format": 1, "session_id": session_id,
-                    "turn_uuid": "mail-" + item["variant"][:24],
-                    "seq": seq, "ts": item["date"],
-                    "role": "member", "harness": "outlook-pst",
-                    "blocks": [{"block_type": "text", "text": item["text"]}],
-                }
-                f.write(json.dumps(turn, ensure_ascii=False, separators=(",", ":")) + "\n")
-                written += 1
-        temporary.replace(out)
+    with staged_directory(dst) as staging:
+        for root_key, messages in groups.items():
+            # Snapshot identities, not an incremental SQLite mapping.
+            session_id = "pst-" + sha(root_key)[:24]
+            with new_private_text(staging / f"{session_id}.tmp") as f:
+                for seq, item in enumerate(messages):
+                    turn = {
+                        "format": 1, "session_id": session_id,
+                        "turn_uuid": "mail-" + item["variant"][:24],
+                        "seq": seq, "ts": item["date"],
+                        "role": "member", "harness": "outlook-pst",
+                        "blocks": [{"block_type": "text", "text": item["text"]}],
+                    }
+                    f.write(json.dumps(turn, ensure_ascii=False, separators=(",", ":")) + "\n")
+                    written += 1
+        for path in staging.glob("*.tmp"):
+            path.rename(path.with_suffix(".funes.jsonl"))
     print(f"Read {len(paths)} EML files; exported {written} distinct emails across {len(groups)} threads.")
     if failed:
         print(f"WARNING: {failed} messages could not be parsed; review and correct before archival.")
-    print(f"Created .funes.jsonl files in {dst}")
-    print(f"Validate: funes index --check '{dst}'")
-    print(f"Index:    funes index '{dst}'")
     return 2 if failed else 0
 
 
@@ -260,7 +257,14 @@ def main():
         parser.error("--limit must be at least 1")
     if args.max_body_chars < 0:
         parser.error("--max-body-chars must be at least 0")
-    return convert(args.eml_dir, args.output_dir, args.limit, args.subject, args.max_body_chars)
+    try:
+        return convert(args.eml_dir, args.output_dir, args.limit, args.subject, args.max_body_chars)
+    except FileSafetyError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    except Exception as exc:
+        print(diagnostic("eml.failed", exc), file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

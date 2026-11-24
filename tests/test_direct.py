@@ -129,12 +129,50 @@ class Tests(unittest.TestCase):
         b.store_message(self.db, msg)
         self.db.commit()
         f.ensure_map(self.db)
-        self.assertEqual(f.map_new_messages(self.db), (1,0))
+        self.assertEqual(f.map_new_messages(self.db, f.resolve_policy(self.db, include_all=True)), (1,0))
         out = Path(self.tmp.name)/'funes'
         self.assertEqual(f.export(self.db,out),1)
         data = json.loads(next(out.glob('*.jsonl')).read_text(encoding='utf-8').strip())
         self.assertEqual(data['harness'], 'outlook-pst')
         self.assertIn('pump.pdf', data['blocks'][0]['text'])
+
+    def test_shared_and_independent_mappings_for_two_same_named_archives(self):
+        other = Path(self.tmp.name) / "elsewhere" / self.pst.name
+        other.parent.mkdir()
+        other.write_bytes(b"second synthetic archive")
+        first = FakeMessage()
+        second = FakeMessage(subject="Inspection follow-up", body="Alignment checked.")
+        # Both archives contain the same conversation; the second repeats one
+        # message. Folder and position alone cannot identify either occurrence.
+        def load(db, path, messages):
+            factory = SimpleNamespace(file=lambda: FakePFF(FakeFolder("Inbox", messages)))
+            self.assertEqual(d.import_pst(db, path, self.args, factory), 0)
+
+        def mapped(db):
+            f.ensure_map(db)
+            f.map_new_messages(db, f.resolve_policy(db, include_all=True))
+            return list(f.turns(db))
+
+        load(self.db, self.pst, [first])
+        original = mapped(self.db)[0]
+        load(self.db, other, [second, first])
+        combined = mapped(self.db)
+        self.assertEqual(combined[0], original)
+        self.assertEqual([row["seq"] for row in combined], [0, 1])
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM source_items").fetchone()[0], 3)
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM import_sources").fetchone()[0], 2)
+        # Independently mapped DBs have independent sequence allocators. Their
+        # overlapping threads must use separate memories, or be imported into one DB.
+        separate = b.open_database(Path(self.tmp.name) / "second.sqlite")
+        try:
+            load(separate, other, [second])
+            independent = mapped(separate)[0]
+        finally:
+            separate.close()
+        self.assertEqual(independent["session_id"], original["session_id"])
+        self.assertEqual(independent["seq"], original["seq"])
+        self.assertNotEqual(independent["turn_uuid"], original["turn_uuid"])
+        self.assertEqual(independent["turn_uuid"], combined[1]["turn_uuid"])
 
 
 if __name__ == '__main__':

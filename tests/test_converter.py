@@ -113,7 +113,7 @@ class OfflineTests(unittest.TestCase):
         p.store_message(self.db,m)
         self.db.commit()
         f.ensure_map(self.db)
-        self.assertEqual(f.map_new_messages(self.db),(1,0))
+        self.assertEqual(f.map_new_messages(self.db, f.resolve_policy(self.db, include_all=True)),(1,0))
         out = Path(self.tmp.name)/'funes'
         self.assertEqual(f.export(self.db,out,per_file=2),1)
         records = [json.loads(line) for file in out.glob('*.jsonl') for line in file.read_text(encoding='utf8').splitlines()]

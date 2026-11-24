@@ -5,6 +5,7 @@ Standard library only. Source-specific readers import this module.
 from __future__ import annotations
 
 import argparse
+from contextlib import closing
 import hashlib
 import json
 import re
@@ -14,6 +15,8 @@ import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
+
+from email_funes_files import FileSafetyError, create_private_database, display_text, open_readonly
 
 SCHEMA_VERSION = 1
 FINGERPRINT_VERSION = 2
@@ -113,8 +116,27 @@ class Message:
     folder: str
 
 
+def validate_existing_database(path: Path) -> bool:
+    """Recognize existing mail archives before writable SQLite setup or chmod."""
+    if not path.exists() or path.stat().st_size == 0:
+        return False
+    try:
+        with closing(open_readonly(path)) as db:
+            if not db.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone():
+                if db.execute("PRAGMA user_version").fetchone()[0] or db.execute("PRAGMA application_id").fetchone()[0]:
+                    raise FileSafetyError("The existing database belongs to a different application.")
+                return False
+            # Base columns shared by legacy and enriched archives.
+            db.execute("SELECT id,message_key,fingerprint,conversation_key,subject,body FROM messages LIMIT 0")
+            db.execute("SELECT source_key,message_id,folder,disposition FROM source_items LIMIT 0")
+            return True
+    except sqlite3.DatabaseError:
+        raise FileSafetyError("The existing file is not a compatible email-funes archive. Choose a fresh database path.") from None
+
+
 def open_database(path: Path) -> sqlite3.Connection:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    validate_existing_database(path)
+    create_private_database(path)
     db = sqlite3.connect(str(path), timeout=120)
     db.execute("PRAGMA journal_mode=WAL")
     db.execute("PRAGMA synchronous=NORMAL")
@@ -232,13 +254,16 @@ def show_stats(db: sqlite3.Connection):
 
 
 def search(db: sqlite3.Connection, query: str, limit: int):
-    print(f"Search: {query}\n")
+    print(f"Search: {display_text(query)}\n")
     try:
         rows = db.execute("""SELECT m.sent_utc, m.sender_email, m.subject,
                               snippet(messages_fts,1,'[',']',' … ',18), m.id
                               FROM messages_fts JOIN messages m ON messages_fts.rowid=m.id
                               WHERE messages_fts MATCH ? ORDER BY rank LIMIT ?""", (query, limit))
         for date, sender, subject, snippet, msg_id in rows:
-            print(f"#{msg_id} | {date or 'unknown'} | {sender}\n  {subject}\n  {snippet}\n")
-    except sqlite3.OperationalError as exc:
-        print(f"Search syntax error: {exc}\nUse SQLite FTS5 syntax, e.g. 'motor OR vibration' or '\"power quality\"'.", file=sys.stderr)
+            print(f"#{msg_id} | {display_text(date or 'unknown')} | {display_text(sender)}\n"
+                  f"  {display_text(subject)}\n  {display_text(snippet)}\n")
+    except sqlite3.OperationalError:
+        print("Search failed. Check the database and use SQLite FTS5 syntax, e.g. 'motor OR vibration'.", file=sys.stderr)
+        return 2
+    return 0

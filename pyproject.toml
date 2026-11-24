@@ -1,0 +1,44 @@
+[build-system]
+requires = ["hatchling==1.33.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "email-funes"
+version = "0.1.0"
+description = "Import local Outlook PST archives into SQLite and export Funes turns"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+pst = ["libpff-python==20261030"]
+rtf = ["striprtf==0.0.35"]
+outlook = ["pywin32==312; sys_platform == 'win32'"]
+
+[project.scripts]
+email-funes = "email_funes.cli:main"
+
+[project.urls]
+Source = "https://github.com/speccy88/email-funes"
+Issues = "https://github.com/speccy88/email-funes/issues"
+
+[tool.hatch.build]
+# Select from the checkout directly. Even stale build/ directories can
+# contain readable mail. Use this same source allowlist for both artifacts.
+only-include = [
+    "scripts/email_funes/__init__.py",
+    "scripts/email_funes/__main__.py",
+    "scripts/email_funes/adapters.py",
+    "scripts/email_funes/cli.py",
+    "scripts/email_funes_common.py",
+    "scripts/email_funes_files.py",
+    "scripts/eml_to_funes.py",
+    "scripts/pst_metadata_audit.py",
+    "scripts/pst_sqlite_recover.py",
+    "scripts/pst_to_sqlite.py",
+    "scripts/pst_to_sqlite_direct.py",
+    "scripts/sqlite_to_funes.py",
+]
+
+[tool.hatch.build.targets.wheel]
+sources = ["scripts"]

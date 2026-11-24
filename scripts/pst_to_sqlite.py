@@ -6,7 +6,7 @@ saved or decoded; only their filenames are recorded. Safe to restart: source
 entries and duplicate messages are tracked in SQLite.
 
 Usage:
-  py -m pip install pywin32
+  py -m pip install ".[outlook]"
   py pst_to_sqlite.py --pst "C:\\path\\mail.pst" --db "C:\\path\\mail.sqlite" --limit 1000
   py pst_to_sqlite.py --pst "C:\\path\\mail.pst" --db "C:\\path\\mail.sqlite"
   py pst_to_sqlite.py --db "C:\\path\\mail.sqlite" --stats
@@ -17,6 +17,7 @@ Do not publish a database containing private or confidential messages.
 from __future__ import annotations
 
 import argparse
+from contextlib import closing
 import hashlib
 import json
 import os
@@ -33,6 +34,12 @@ from typing import Any, Optional
 from email_funes_common import (
     Message, message_fingerprint, normalize_message_id, clean_body, email_is_bulk, email_is_spam, folder_exclusion, normalized_name, open_database, safe_get, search, sha, show_stats, source_seen, store_message
 )
+from email_funes_files import (FileSafetyError, check_writable_file, diagnostic,
+                              open_import_log, open_readonly, require_distinct, sqlite_paths)
+
+
+class OutlookFailure(RuntimeError):
+    """Fixed diagnostic text that can safely be printed."""
 
 MAIL_ITEM_CLASS = 43
 MAPI_MESSAGE_ID = (
@@ -163,13 +170,12 @@ def find_pst_store(namespace: Any, pst: Path) -> Any:
     return None
 
 
-def iter_folders(root: Any, args: argparse.Namespace):
+def iter_folders(root: Any, args: argparse.Namespace, report_error):
     stack = [(root, str(safe_get(root, "Name", "PST")))]
     while stack:
         folder, path = stack.pop()
         excluded = folder_exclusion(str(safe_get(folder, "Name", "")), args)
         if excluded:
-            print(f"SKIP FOLDER ({excluded}): {path}", flush=True)
             continue
         try:
             children = folder.Folders
@@ -177,26 +183,32 @@ def iter_folders(root: Any, args: argparse.Namespace):
                 child = children.Item(i)
                 stack.append((child, path + "/" + str(safe_get(child, "Name", ""))))
         except Exception as exc:
-            print(f"WARNING unable to list subfolders for {path}: {exc}", file=sys.stderr)
+            report_error("folder.children", exc, path)
         yield folder, path
 
 
-def import_pst(db: sqlite3.Connection, pst: Path, args: argparse.Namespace) -> int:
+def require_outlook():
     try:
         import pythoncom
         import win32com.client
     except ImportError as exc:
-        raise RuntimeError("pywin32 is required: py -m pip install pywin32") from exc
+        raise OutlookFailure('Outlook Classic and pywin32 are required. From the Windows checkout run: py -m pip install ".[outlook]"') from exc
+    return pythoncom, win32com.client
 
+
+def import_pst(db: sqlite3.Connection, pst: Path, args: argparse.Namespace, modules=None) -> int:
+    pythoncom, client = modules if modules is not None else require_outlook()
+    private = getattr(args, "private_diagnostics", False)
+    errorlog = args.db.with_suffix(".private.errors.txt" if private else ".errors.txt")
+    require_distinct(pst, *sqlite_paths(args.db), errorlog)
     pythoncom.CoInitialize()
     namespace = None
     newly_attached = False
     root = None
     read = inserted = duplicates = seen = filtered = errors = 0
     start = time.monotonic()
-    errorlog = args.db.with_suffix(".errors.txt")
     try:
-        outlook = win32com.client.Dispatch("Outlook.Application")
+        outlook = client.Dispatch("Outlook.Application")
         namespace = outlook.GetNamespace("MAPI")
         store = find_pst_store(namespace, pst)
         if store is None:
@@ -205,18 +217,23 @@ def import_pst(db: sqlite3.Connection, pst: Path, args: argparse.Namespace) -> i
             newly_attached = True
             store = find_pst_store(namespace, pst)
         if store is None:
-            raise RuntimeError("PST could not be located in Outlook's data stores after mounting.")
+            raise OutlookFailure("Outlook could not locate the requested PST after mounting.")
         root = store.GetRootFolder()
-        print("Importing ONLY this PST:", pst, flush=True)
-        with errorlog.open("a", encoding="utf-8") as err:
-            for folder, folder_path in iter_folders(root, args):
-                print("Folder:", folder_path, flush=True)
+        print("Reading the requested Outlook store.", flush=True)
+        with open_import_log(errorlog) as err:
+            def report_error(event, exc, location):
+                nonlocal errors
+                errors += 1
+                err(diagnostic(event, exc, private=private, location=location))
+                if errors <= 10:
+                    print(diagnostic(event, exc), file=sys.stderr)
+
+            for folder, folder_path in iter_folders(root, args, report_error):
                 try:
                     items = folder.Items
                     item = items.GetFirst()
                 except Exception as exc:
-                    errors += 1
-                    err.write(f"folder={folder_path} error={exc}\n")
+                    report_error("folder.items", exc, folder_path)
                     continue
                 while item is not None:
                     if args.limit and read >= args.limit:
@@ -246,10 +263,7 @@ def import_pst(db: sqlite3.Connection, pst: Path, args: argparse.Namespace) -> i
                                 else:
                                     duplicates += 1
                     except Exception as exc:
-                        errors += 1
-                        err.write(f"folder={folder_path} error={type(exc).__name__}: {exc}\n")
-                        if errors <= 10:
-                            print(f"WARNING: one message skipped in {folder_path}: {exc}", file=sys.stderr)
+                        report_error("item.read", exc, folder_path)
                     finally:
                         if read and read % args.batch_size == 0:
                             db.commit()
@@ -261,14 +275,12 @@ def import_pst(db: sqlite3.Connection, pst: Path, args: argparse.Namespace) -> i
                     try:
                         item = items.GetNext()
                     except Exception as exc:
-                        errors += 1
-                        err.write(f"folder={folder_path} iteration_error={exc}\n")
-                        print(f"WARNING: folder iteration stopped: {folder_path}: {exc}", file=sys.stderr)
+                        report_error("folder.next", exc, folder_path)
                         break
                 db.commit()
                 if args.limit and read >= args.limit:
                     break
-        return errors
+        return 2 if errors else 0
     except KeyboardInterrupt:
         print("\nInterrupted. Committing completed messages; rerun the same command to resume.", file=sys.stderr)
         db.commit()
@@ -282,60 +294,53 @@ def import_pst(db: sqlite3.Connection, pst: Path, args: argparse.Namespace) -> i
                 namespace.RemoveStore(root)
                 print("PST detached from Outlook profile (file is still on disk).")
             except Exception as exc:
-                print(f"NOTE: Could not detach PST automatically: {exc}", file=sys.stderr)
+                print(diagnostic("store.detach", exc), file=sys.stderr)
         pythoncom.CoUninitialize()
 
 
 def main(argv: Optional[list[str]] = None) -> int:
+    from email_funes.adapters import legacy_pst_options
+
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--pst", type=Path, help="Existing .pst file (requires Windows and Outlook Classic)")
-    parser.add_argument("--db", required=True, type=Path, help="Destination SQLite file")
-    parser.add_argument("--limit", type=int, default=0, help="Trial run: inspect at most N email items (0=all)")
-    parser.add_argument("--batch-size", type=int, default=250, help="Commit every N emails (default 250)")
-    parser.add_argument("--progress", type=int, default=1000, help="Report progress every N emails")
-    parser.add_argument("--include-junk", dest="exclude_junk", action="store_false", help="Include Junk/Spam folders")
-    parser.add_argument("--include-deleted", dest="exclude_deleted", action="store_false", help="Include Deleted Items folders")
-    parser.add_argument("--include-header-spam", action="store_true", help="Do not filter messages with clear spam headers")
-    parser.add_argument("--skip-bulk", action="store_true", help="Also exclude mailing lists/newsletters (off by default)")
-    parser.add_argument("--max-body-chars", type=int, default=0, help="Optional limit per email body (0=unlimited)")
-    parser.add_argument("--stats", action="store_true", help="Show DB statistics (no Outlook required)")
-    parser.add_argument("--search", metavar="FTS5_QUERY", help="Search the DB (no Outlook required)")
-    parser.add_argument("--results", type=int, default=15, help="Maximum search hits (default 15)")
-    parser.set_defaults(exclude_junk=True, exclude_deleted=True)
+    legacy_pst_options(parser)
     args = parser.parse_args(argv)
+    return run(args, parser)
+
+
+def run(args, parser):
     if args.batch_size < 1 or args.progress < 1 or args.limit < 0 or args.results < 1 or args.max_body_chars < 0:
         parser.error("limit/max-body-chars must be >=0; batch-size/progress/results must be >=1")
-    args.db = args.db.expanduser().resolve()
+    args.db = args.db.expanduser().absolute()
     if args.pst:
         if os.name != "nt":
             parser.error("PST extraction via Outlook COM requires Windows. Use the .sqlite stats/search modes on other systems.")
         args.pst = args.pst.expanduser().resolve()
         if not args.pst.is_file() or args.pst.suffix.lower() != ".pst":
             parser.error("--pst must point to an existing .pst file. This script will NOT create one.")
-        if args.pst == args.db:
-            parser.error("PST and SQLite paths must differ")
+        log = args.db.with_suffix(".private.errors.txt" if args.private_diagnostics else ".errors.txt")
+        try:
+            require_distinct(args.pst, *sqlite_paths(args.db), log)
+            check_writable_file(log)
+        except FileSafetyError as exc:
+            parser.error(str(exc))
     elif not (args.stats or args.search):
         parser.error("Supply --pst to import, or --stats/--search to inspect an existing database")
     elif not args.db.is_file():
         parser.error("Database not found")
 
-    db = open_database(args.db)
     try:
-        exitcode = 0
-        if args.pst:
-            try:
-                exitcode = import_pst(db, args.pst, args)
-            except Exception as exc:
-                print(f"ERROR: {exc}", file=sys.stderr)
-                return 1
-        if args.stats or args.pst:
-            show_stats(db)
-        if args.search:
-            search(db, args.search, args.results)
-        return exitcode
-    finally:
-        db.commit()
-        db.close()
+        modules = require_outlook() if args.pst else None
+        with closing(open_database(args.db) if args.pst else open_readonly(args.db)) as db:
+            exitcode = import_pst(db, args.pst, args, modules) if args.pst else 0
+            if args.stats or args.pst:
+                show_stats(db)
+            if args.search:
+                exitcode = search(db, args.search, args.results) or exitcode
+            return exitcode
+    except Exception as exc:
+        print(str(exc) if isinstance(exc, (OutlookFailure, FileSafetyError))
+              else diagnostic("import.failed", exc), file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

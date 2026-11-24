@@ -29,6 +29,10 @@ import sys
 import time
 import unicodedata
 from typing import Any
+from email_funes.adapters import PST_INSTALL_HELP
+
+from email_funes_files import (FileSafetyError, diagnostic, new_private_text, open_readonly,
+                              require_distinct, sqlite_paths)
 
 VERSION = "1.1.0"
 MAX_RECORD_SETS = 16
@@ -370,12 +374,15 @@ def open_old_db(path: Path | None, errors: Counter) -> sqlite3.Connection | None
     if not path.is_file():
         errors["db.missing_file"] += 1
         return None
+    conn = None
     try:
-        conn = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
+        conn = open_readonly(path)
         conn.execute("SELECT m.sender_email,m.to_list,m.subject,m.body FROM messages m LIMIT 1")
         conn.execute("SELECT source_key,message_id FROM source_items LIMIT 1")
         return conn
     except Exception as exc:
+        if conn is not None:
+            conn.close()
         errors[f"db.open.{sanitized_error(exc)}"] += 1
         return None
 
@@ -462,7 +469,7 @@ def scan(pst: Path, db: sqlite3.Connection | None, per_folder: int,
                 for i in range(children - 1, -1, -1):
                     try:
                         child = folder.get_sub_folder(i)
-                        name = text_value(try_attr(child, "name", stats.errors)) or "[unnamed]"
+                        name = text_value(try_attr(child, "name", stats.errors)) or str(i)
                         stack.append((child, path + "/" + name))
                     except Exception as exc:
                         stats.errors[f"folder.child.{sanitized_error(exc)}"] += 1
@@ -677,8 +684,8 @@ def report(stats: Stats, pst: Path, db_supplied: bool, per_folder: int,
     return "\n".join(lines) + "\n"
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+def main(argv: list[str] | None = None, *, prog=None) -> int:
+    parser = argparse.ArgumentParser(prog=prog, description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--pst", required=True, type=Path, help="PST archive, opened read-only")
     parser.add_argument("--db", type=Path, help="Existing email-funes SQLite database (optional, read-only)")
     parser.add_argument("--out", type=Path, default=Path("pst_metadata_audit.log"), help="Output diagnostic .log file")
@@ -692,23 +699,22 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--pst must point to an existing .pst file")
     if args.db is not None:
         args.db = args.db.expanduser().resolve()
-    args.out = args.out.expanduser().resolve()
-    if args.out == args.pst or (args.db and args.out == args.db):
-        parser.error("The diagnostic log must not overwrite the PST or SQLite file")
-    if args.out.exists() and any(path and path.exists() and args.out.samefile(path)
-                                for path in (args.pst, args.db)):
-        parser.error("The diagnostic log must not be a hard link to the PST or SQLite file")
+    args.out = args.out.expanduser().absolute()
+    try:
+        require_distinct(args.pst, args.out, *(sqlite_paths(args.db) if args.db else ()))
+    except FileSafetyError as exc:
+        parser.error(str(exc))
+    if os.path.lexists(args.out):
+        parser.error("The report already exists. Choose a new --out path.")
     if args.per_folder < 0 or args.progress < 1 or args.max_report_folders < 0:
         parser.error("Invalid numeric option")
     if args.full:
         args.per_folder = 0
     errors = Counter()
-    db = open_old_db(args.db, errors)
     try:
         import pypff
     except ImportError:
-        print("ERROR: module pypff missing. Install: python -m pip install --only-binary=:all: libpff-python",file=sys.stderr)
-        if db: db.close()
+        print(PST_INSTALL_HELP,file=sys.stderr)
         return 2
     try:
         version = text_value(pypff.get_version()) if callable(getattr(pypff, "get_version", None)) else "unknown"
@@ -716,20 +722,26 @@ def main(argv: list[str] | None = None) -> int:
         version = "unknown"
     print("Reading PST metadata. No emails or attachments will be exported.", flush=True)
     started = time.monotonic()
+    db = open_old_db(args.db, errors)
     try:
         stats = scan(args.pst, db, args.per_folder, args.progress, pypff)
+        if db is not None:
+            db.close()
+            db = None
         stats.errors.update(errors)
         output = report(stats, args.pst, args.db is not None, args.per_folder, version, args.max_report_folders)
-        args.out.parent.mkdir(parents=True, exist_ok=True)
-        args.out.write_text(output, encoding="utf-8")
+        with new_private_text(args.out) as report_file:
+            report_file.write(output)
         elapsed = time.monotonic() - started
         print(f"Finished: {stats.sampled:,} sampled of {stats.total_slots:,} message slots in {stats.folders:,} folders; elapsed {elapsed:.1f} s.")
-        print(f"Wrote privacy-safe log: {args.out}")
-        print("Send this .log file here; there is no need to share the PST.")
+        print("Wrote the diagnostic report.")
         if stats.fatal:
             print("Scan stopped with a sanitized error; see FATAL in log.",file=sys.stderr)
             return 1
-        return 0
+        return 2 if stats.errors else 0
+    except Exception as exc:
+        print(diagnostic("audit.failed", exc), file=sys.stderr)
+        return 1
     finally:
         if db is not None:
             db.close()

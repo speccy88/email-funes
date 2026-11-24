@@ -1,5 +1,5 @@
 """Synthetic regression tests for recovered metadata and stable export choices."""
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 import hashlib
 import io
 import json
@@ -146,17 +146,17 @@ class EnrichedExportTests(unittest.TestCase):
             list(export.turns(self.db, policy))
 
     def test_legacy_database_and_policyless_mapping_stay_compatible(self):
-        policy = self.map()
+        policy = self.map(include_all=True)
         self.assertEqual(policy, export.ExportPolicy())
         original = list(export.turns(self.db, policy))
         self.db.execute("DROP TABLE funes_export_policy")
         self.db.commit()
-        self.assertEqual(export.map_new_messages(self.db, policy), (0, 0))
+        self.assertEqual(export.map_new_messages(self.db), (0, 0))
         self.assertEqual(list(export.turns(self.db, policy)), original)
         self.assertEqual(len(original), 5)
 
     def test_enriching_policyless_legacy_mapping_requires_deliberate_rebuild(self):
-        self.map()
+        self.map(include_all=True)
         self.db.execute("DROP TABLE funes_export_policy")
         self.db.commit()
         self.enrich()
@@ -193,8 +193,14 @@ class EnrichedExportTests(unittest.TestCase):
         self.assertEqual([record["seq"] for record in records], [0])
 
     def test_legacy_cli_notice_and_enriched_snapshot_format(self):
+        with redirect_stderr(io.StringIO()) as error:
+            for args in (["--dry-run"], ["--out", str(self.root / "blocked")]):
+                self.assertEqual(export.main(["--db", str(self.path), *args]), 2)
+        self.assertIn("--include-all", error.getvalue())
+        self.assertFalse((self.root / "blocked").exists())
+        self.assertFalse(export.table_exists(self.db, "funes_map"))
         with redirect_stdout(io.StringIO()) as output:
-            self.assertEqual(export.main(["--db", str(self.path), "--dry-run"]), 0)
+            self.assertEqual(export.main(["--db", str(self.path), "--dry-run", "--include-all"]), 0)
         self.assertIn("Legacy database", output.getvalue())
         self.enrich()
         policy = self.map()
@@ -206,6 +212,31 @@ class EnrichedExportTests(unittest.TestCase):
             self.assertEqual(set(record), {"format", "session_id", "turn_uuid", "seq", "ts", "role", "harness", "blocks"})
             self.assertEqual(record["role"], "member")
             self.assertNotIn("bcc@example.com", record["blocks"][0]["text"])
+
+    def test_saved_selection_reused_and_saved_bcc_requires_confirmation(self):
+        self.enrich()
+        policy = self.map(include_meetings=True, include_bcc=True)
+        with self.assertRaisesRegex(ValueError, "Bcc"):
+            export.resolve_policy(self.db)
+        self.assertEqual(export.resolve_policy(self.db, include_bcc=True), policy)
+
+    def test_schema_change_cannot_silently_switch_a_stored_rendering_policy(self):
+        policy = self.map(include_all=True)
+        self.enrich()
+        with self.assertRaisesRegex(ValueError, "incompatible"):
+            export.resolve_policy(self.db)
+        self.assertEqual(export.stored_policy_json(self.db), policy.serialize())
+
+    def test_diagnostics_hide_unrecognized_category_and_keep_original_evidence(self):
+        self.enrich()
+        secret = "Sensitive\x1b[2K custom field"
+        self.db.execute("UPDATE messages SET message_category=? WHERE id=1", (secret,))
+        self.db.commit()
+        with redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(export.main(["--db", str(self.path), "--dry-run", "--include-all"]), 0)
+        self.assertIn("Other category: 1", output.getvalue())
+        self.assertNotIn(secret, output.getvalue())
+        self.assertEqual(self.db.execute("SELECT message_category FROM messages WHERE id=1").fetchone()[0], secret)
 
 
 if __name__ == "__main__":

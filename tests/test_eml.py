@@ -1,15 +1,40 @@
 """Synthetic EML regressions: attachment exclusion and truthful message dates."""
 from email.message import EmailMessage
+from contextlib import redirect_stdout, redirect_stderr
+from io import StringIO
 from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 import eml_to_funes as eml
 
 
 class EMLTests(unittest.TestCase):
+    def test_parse_failure_omits_private_path_and_error_details(self):
+        with tempfile.TemporaryDirectory() as directory:
+            src = Path(directory) / 'private-source'
+            src.mkdir()
+            (src / 'private-sender.eml').write_text('Date: invalid\n\nSynthetic message')
+            console = StringIO()
+            with redirect_stdout(console), redirect_stderr(console):
+                self.assertEqual(eml.convert(src, Path(directory) / 'private-target', None, None, 0), 2)
+            self.assertIn('eml.parse error=ValueError', console.getvalue())
+            self.assertNotIn('private-', console.getvalue())
+
+    def test_failed_eml_write_leaves_no_incomplete_export(self):
+        with tempfile.TemporaryDirectory() as directory:
+            src = Path(directory) / 'source'
+            src.mkdir()
+            (src / 'example.eml').write_text('Date: Tue, 03 Nov 2026 10:00:00 -0500\n\nDemo')
+            dst = Path(directory) / 'out'
+            with patch.object(eml, 'new_private_text', side_effect=OSError('simulated write failure')):
+                with self.assertRaises(OSError):
+                    eml.convert(src, dst, None, None, 0)
+            self.assertEqual(list(Path(directory).iterdir()), [src])
+
     def test_attachment_subtrees_are_not_indexed(self):
         outer = EmailMessage()
         outer.set_content('Body to preserve.')

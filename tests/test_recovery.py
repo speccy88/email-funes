@@ -349,6 +349,17 @@ class RecoveryTests(unittest.TestCase):
         with self.assertRaisesRegex(recover.RecoveryError,'already enriched'):
             recover.run_recovery(self.pst,self.work,self.directory/'second.sqlite',self.log)
 
+    def test_refuses_future_sidecar_for_report_and_orphan_output_sidecar(self):
+        wal = Path(str(self.work) + '-wal')
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            recover.main(['--pst',str(self.pst),'--db',str(self.old),'--out-db',str(self.work),'--log',str(wal)])
+        self.assertFalse(wal.exists())
+        wal.write_bytes(b'existing orphan sidecar')
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            recover.main(['--pst',str(self.pst),'--db',str(self.old),'--out-db',str(self.work),'--log',str(self.log)])
+        self.assertEqual(wal.read_bytes(), b'existing orphan sidecar')
+        self.assertFalse(self.work.exists())
+
     def test_publish_refuses_target_created_after_validation(self):
         self.work.write_bytes(b'completed output')
         target=self.directory/'target.sqlite'

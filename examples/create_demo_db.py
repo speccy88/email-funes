@@ -180,7 +180,6 @@ def main(argv: list[str] | None = None) -> int:
         if args.enriched:
             add_demo_metadata(db)
         print(f"Synthetic demo: new={added}; duplicate occurrences={duplicates}; already seen={already_seen}")
-        print(f"Database: {database}")
         show_stats(db)
     finally:
         db.close()

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Import Outlook PST directly to SQLite with pypff (no Outlook/COM required).
 
-Windows: python -m pip install libpff-python
+From a checkout: python -m pip install --only-binary=:all: ".[pst]"
            python pst_to_sqlite_direct.py --pst archive.pst --db mail.sqlite --limit 10
 
 Uses the shared SQLite schema and filters from email_funes_common.py.
@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+from contextlib import closing
 from email.header import decode_header, make_header
 from email.parser import Parser
 from email.utils import parseaddr
@@ -28,6 +29,13 @@ import time
 from typing import Any
 
 import email_funes_common as base
+from email_funes.adapters import PST_INSTALL_HELP
+from email_funes_files import (FileSafetyError, check_writable_file, diagnostic,
+                              open_import_log, open_readonly, require_distinct, source_signature, sqlite_paths)
+
+
+class ImportFailure(RuntimeError):
+    """Fixed diagnostic text that can safely be printed."""
 
 
 class HTMLToText(HTMLParser):
@@ -155,13 +163,14 @@ def register_pst_source(db, pst: Path) -> tuple[int, int]:
         (path,),
     ).fetchone()
     if previous is not None and tuple(previous) != signature:
-        raise RuntimeError(
+        raise ImportFailure(
             'The PST changed since its previous import (size or modification time). '
             'Resume with the unchanged original, or import the new snapshot into '
             'a new SQLite database. Positional source IDs cannot safely resume this file.'
         )
     if previous is None:
-        if db.execute('SELECT 1 FROM source_items LIMIT 1').fetchone():
+        if (not db.execute('SELECT 1 FROM import_sources LIMIT 1').fetchone()
+                and db.execute('SELECT 1 FROM source_items LIMIT 1').fetchone()):
             print('WARNING: recording a source baseline in a populated database. '
                   'Earlier imports cannot be verified; use the same unchanged PST.',
                   file=sys.stderr)
@@ -224,46 +233,67 @@ def build_message(msg: Any, pst_path: Path, folder: str, index: int, args: argpa
     ), ''
 
 
+def require_pypff():
+    try:
+        import pypff
+    except ImportError as exc:
+        raise ImportFailure(PST_INSTALL_HELP) from exc
+    return pypff
+
+
 def import_pst(db, pst: Path, args, pypff_module=None) -> int:
     if pypff_module is None:
-        try:
-            import pypff as pypff_module
-        except ImportError as exc:
-            raise RuntimeError('pypff is not installed. Run: python -m pip install --only-binary=:all: libpff-python; see docs/troubleshooting.md if no wheel matches your Python.') from exc
-    signature = register_pst_source(db, pst)
+        pypff_module = require_pypff()
+    signature = source_signature(pst)
+
+    def verify_source():
+        if source_signature(pst) != signature:
+            raise ImportFailure('The PST changed during import. Any pending writes were discarded. '
+                                'Start a new database for the new snapshot.')
+
+    def commit_batch():
+        verify_source()
+        db.commit()
+
     f = pypff_module.file()
     read = inserted = duplicate = already = filtered = errors = 0
     empty_bodies = missing_senders = missing_recipients = missing_dates = 0
     start = time.monotonic()
-    errpath = args.db.with_suffix('.direct.errors.txt')
+    private = getattr(args, 'private_diagnostics', False)
+    errpath = args.db.with_suffix('.direct.private.errors.txt' if private else '.direct.errors.txt')
+    require_distinct(pst, *sqlite_paths(args.db), errpath)
     try:
-        print('Opening PST directly, without Outlook:', pst, flush=True)
+        print('Opening PST with libpff.', flush=True)
         f.open(str(pst))
         root = f.get_root_folder()
         if root is None:
-            raise RuntimeError('No root folder was returned by the PST reader.')
+            raise ImportFailure('No root folder was returned by the PST reader.')
+        verify_source()
+        register_pst_source(db, pst)
         stack = [(root, as_text(base.safe_get(root, 'name')) or 'PST')]
-        with errpath.open('a', encoding='utf-8') as log:
+        with open_import_log(errpath) as log:
             while stack:
                 folder, path = stack.pop()
                 excluded = base.folder_exclusion(path.rsplit('/',1)[-1], args)
                 if excluded:
-                    print('SKIP FOLDER:', path, '(', excluded, ')', flush=True)
                     continue
-                print('Folder:', path, flush=True)
                 try:
                     folder_children = folder_count(folder, 'folders')
                     for i in range(folder_children - 1, -1, -1):
-                        child = folder.get_sub_folder(i)
-                        stack.append((child, path + '/' + (as_text(base.safe_get(child,'name')) or str(i))))
+                        try:
+                            child = folder.get_sub_folder(i)
+                            stack.append((child, path + '/' + (as_text(base.safe_get(child,'name')) or str(i))))
+                        except Exception as exc:
+                            errors += 1
+                            log(diagnostic('folder.child', exc, private=private, location=f'{path}/{i}'))
                 except Exception as exc:
                     errors += 1
-                    log.write(f'folder={path} children_error={exc}\n')
+                    log(diagnostic('folder.children', exc, private=private, location=path))
                 try:
                     n = folder_count(folder, 'messages')
                 except Exception as exc:
                     errors += 1
-                    log.write(f'folder={path} messages_count_error={exc}\n')
+                    log(diagnostic('folder.count', exc, private=private, location=path))
                     continue
                 for i in range(n):
                     if args.limit and read >= args.limit:
@@ -290,33 +320,43 @@ def import_pst(db, pst: Path, args, pypff_module=None) -> int:
                             raise
                         except Exception as exc:
                             errors += 1
-                            log.write(f'folder={path} index={i} error={type(exc).__name__}: {exc}\n')
+                            log(diagnostic('item.read', exc, private=private, location=f'{path}/{i}'))
                             if errors <= 10:
-                                print('WARNING: unable to read item:', path, i, str(exc), file=sys.stderr)
+                                print(diagnostic('item.read', exc), file=sys.stderr)
                     if read % args.batch_size == 0:
-                        db.commit()
+                        commit_batch()
                     if read % args.progress == 0:
                         elapsed = int(time.monotonic() - start)
                         print(f'inspected={read:,}, new={inserted:,}, duplicate={duplicate:,}, '
                               f'previously_imported={already:,}, filtered={filtered:,}, '
                               f'errors={errors:,}, elapsed={elapsed}s', flush=True)
-                db.commit()
+                commit_batch()
                 if args.limit and read >= args.limit:
                     break
-        final_stat = pst.stat()
-        if signature != (final_stat.st_size, final_stat.st_mtime_ns):
-            raise RuntimeError('PST changed during import. Completed rows were saved, '
-                               'but this snapshot must be reimported into a new database.')
+        f.close()
+        f = None
+        verify_source()
         return 0 if errors == 0 else 2
     except KeyboardInterrupt:
+        try:
+            if f is not None:
+                f.close()
+                f = None
+            commit_batch()
+        except BaseException:
+            db.rollback()
+            raise
         print('\nInterrupted: SQLite changes saved. Rerun to continue.', file=sys.stderr)
         return 130
+    except BaseException:
+        db.rollback()
+        raise
     finally:
-        db.commit()
-        try:
-            f.close()
-        except Exception:
-            pass
+        if f is not None:
+            try:
+                f.close()
+            except Exception:
+                pass
         print(f'Run summary: inspected={read:,}; new={inserted:,}; duplicate={duplicate:,}; '
               f'previously imported={already:,}; filtered={filtered:,}; errors={errors:,}')
         if empty_bodies or missing_senders or missing_recipients or missing_dates:
@@ -325,53 +365,49 @@ def import_pst(db, pst: Path, args, pypff_module=None) -> int:
                   f'missing both dates={missing_dates:,}. '
                   'RTF-only bodies and absent transport headers can cause gaps.')
         if errors:
-            print('Error details:', errpath)
+            print('Read errors were recorded in the import log.')
 
 
 def main(argv=None):
+    from email_funes.adapters import legacy_pst_options
+
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('--pst', type=Path, help='Existing PST file (no Outlook needed)')
-    parser.add_argument('--db', required=True, type=Path, help='Destination SQLite file')
-    parser.add_argument('--limit', type=int, default=0, help='Inspect at most N items (0=all)')
-    parser.add_argument('--batch-size', type=int, default=250)
-    parser.add_argument('--progress', type=int, default=1000)
-    parser.add_argument('--include-junk', dest='exclude_junk', action='store_false')
-    parser.add_argument('--include-deleted', dest='exclude_deleted', action='store_false')
-    parser.add_argument('--include-header-spam', action='store_true')
-    parser.add_argument('--skip-bulk', action='store_true', help='Optional: also omit newsletters/mailing lists')
-    parser.add_argument('--max-body-chars', type=int, default=0)
-    parser.add_argument('--stats', action='store_true')
-    parser.add_argument('--search', metavar='FTS5_QUERY')
-    parser.add_argument('--results', type=int, default=15)
-    parser.set_defaults(exclude_junk=True, exclude_deleted=True)
+    legacy_pst_options(parser)
     args = parser.parse_args(argv)
+    return run(args, parser)
+
+
+def run(args, parser):
     if args.limit < 0 or args.batch_size <= 0 or args.progress <= 0 or args.max_body_chars < 0 or args.results <= 0:
         parser.error('Invalid numeric option')
-    args.db = args.db.expanduser().resolve()
+    args.db = args.db.expanduser().absolute()
     if args.pst:
         args.pst = args.pst.expanduser().resolve()
         if not args.pst.is_file() or args.pst.suffix.casefold() != '.pst':
             parser.error('--pst must be an existing .pst file')
-        if args.db == args.pst:
-            parser.error('Database must be different from source PST')
+        log = args.db.with_suffix('.direct.private.errors.txt' if args.private_diagnostics else '.direct.errors.txt')
+        try:
+            require_distinct(args.pst, *sqlite_paths(args.db), log)
+            check_writable_file(log)
+        except FileSafetyError as exc:
+            parser.error(str(exc))
     elif not (args.stats or args.search):
         parser.error('Specify --pst, --stats or --search')
     elif not args.db.is_file():
         parser.error('Database not found')
-    db = base.open_database(args.db)
     try:
-        status = import_pst(db, args.pst, args) if args.pst else 0
-        if args.stats or args.pst:
-            base.show_stats(db)
-        if args.search:
-            base.search(db, args.search, args.results)
-        return status
+        reader = require_pypff() if args.pst else None
+        with closing(base.open_database(args.db) if args.pst else open_readonly(args.db)) as db:
+            status = import_pst(db, args.pst, args, reader) if args.pst else 0
+            if args.stats or args.pst:
+                base.show_stats(db)
+            if args.search:
+                status = base.search(db, args.search, args.results) or status
+            return status
     except Exception as exc:
-        print(f'ERROR: {type(exc).__name__}: {exc}', file=sys.stderr)
+        print(str(exc) if isinstance(exc, (ImportFailure, FileSafetyError))
+              else diagnostic('import.failed', exc), file=sys.stderr)
         return 1
-    finally:
-        db.commit()
-        db.close()
 
 
 if __name__ == '__main__':

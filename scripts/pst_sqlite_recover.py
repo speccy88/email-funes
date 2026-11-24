@@ -30,6 +30,9 @@ import time
 from typing import Any
 
 import pst_metadata_audit as audit
+from email_funes.adapters import PST_INSTALL_HELP
+from email_funes_files import (FileSafetyError, create_private_database, diagnostic, new_private_text,
+                              open_readonly, private_mkdir, require_distinct, source_signature, sqlite_paths)
 
 VERSION = "1.1.0"
 TARGET_MESSAGE_PROPS = {
@@ -449,11 +452,6 @@ def resolve_aliases(conn, aliases: dict[str, Counter], counts: Counter):
         counts["filled_sender_via_unique_alias"]+=1
 
 
-def source_signature(pst: Path) -> tuple[int, int, int, int]:
-    stat = pst.stat()
-    return stat.st_size, stat.st_mtime_ns, stat.st_dev, stat.st_ino
-
-
 def check_source_baseline(db, pst: Path, signature: tuple, counts: Counter):
     """Verify the importer's saved snapshot when the source database has one."""
     has_table = db.execute(
@@ -486,16 +484,17 @@ def run_recovery(pst:Path, original:Path, working:Path, log:Path,
     counts=Counter()
     aliases: dict[str,Counter]=defaultdict(Counter)
     started=time.monotonic()
-    pst, original, working = pst.resolve(), original.resolve(), working.resolve()
+    pst, original, working = pst.resolve(), original.resolve(), working.absolute()
+    require_distinct(pst, *sqlite_paths(original), *sqlite_paths(working), log)
     if working in (pst, original) or (working.exists() and working.stat().st_size):
         raise RecoveryError("Recovery needs a separate empty temporary database.")
     signature=source_signature(pst)
-    original_uri=original.as_uri()+"?mode=ro"
     # A consistent SQLite backup copies even a source currently using WAL.
-    with closing(sqlite3.connect(original_uri,uri=True)) as src:
+    with closing(open_readonly(original)) as src:
         if src.execute("SELECT 1 FROM sqlite_master WHERE name IN ('recovery_metadata','recovery_recipients','recovery_aliases') LIMIT 1").fetchone():
             raise RecoveryError("The input database was already enriched. Start from the original pre-recovery database and use a new output name.")
         check_source_baseline(src,pst,signature,counts)
+        create_private_database(working)
         dst=sqlite3.connect(working)
         try:
             src.backup(dst)
@@ -527,7 +526,7 @@ def run_recovery(pst:Path, original:Path, working:Path, log:Path,
                 for i in range(nchild-1,-1,-1):
                     try:
                         child=folder.get_sub_folder(i)
-                        stack.append((child,path+"/"+(audit.text_value(audit.try_attr(child,"name",errors)) or "[unnamed]")))
+                        stack.append((child,path+"/"+(audit.text_value(audit.try_attr(child,"name",errors)) or str(i))))
                     except Exception as exc:
                         errors["child."+type(exc).__name__]+=1
             except Exception as exc:
@@ -680,12 +679,14 @@ def publish_database(working: Path, target: Path):
     a file created after CLI validation. If the filesystem cannot create links,
     fail without falling back to an overwrite or a partially copied output.
     """
+    if any(os.path.lexists(path) for path in sqlite_paths(target)[1:]):
+        raise RecoveryError("A sidecar already exists for the output database. Choose a fresh path.")
     os.link(working, target)
     working.unlink()
 
 
-def main(argv=None):
-    p=argparse.ArgumentParser(description=__doc__)
+def main(argv=None, *, prog=None):
+    p=argparse.ArgumentParser(prog=prog, description=__doc__)
     p.add_argument("--pst",required=True,type=Path,help="Same original PST path used for first import")
     p.add_argument("--db",required=True,type=Path,help="Existing email-funes SQLite (never modified)")
     p.add_argument("--out-db",required=True,type=Path,help="New enriched SQLite file (must not exist)")
@@ -695,47 +696,61 @@ def main(argv=None):
     p.add_argument("--progress",type=int,default=4000)
     p.add_argument("--recover-rtf",action="store_true",help="Attempt RTF text recovery; requires striprtf")
     args=p.parse_args(argv)
-    paths=[args.pst.expanduser().resolve(),args.db.expanduser().resolve(),args.out_db.expanduser().resolve(),args.log.expanduser().resolve()]
-    pst,source,target,log=paths
+    pst,source=args.pst.expanduser().resolve(),args.db.expanduser().resolve()
+    target,log=args.out_db.expanduser().absolute(),args.log.expanduser().absolute()
     if not pst.is_file() or pst.suffix.lower()!=".pst": p.error("--pst needs an existing .pst file")
     if not source.is_file(): p.error("--db needs an existing .sqlite file")
-    if target.exists(): p.error("--out-db already exists; use a new output name")
-    if len(set(paths))!=4: p.error("PST, input database, output database, and log paths must all differ")
-    if log.exists() and any(log.samefile(path) for path in (pst,source)):
-        p.error("The report must not be a hard link to the PST or input database")
+    try:
+        require_distinct(pst,*sqlite_paths(source),*sqlite_paths(target),log)
+    except FileSafetyError as exc:
+        p.error(str(exc))
+    if any(os.path.lexists(path) for path in sqlite_paths(target)):
+        p.error("--out-db or a sidecar already exists; choose a fresh output name")
+    if os.path.lexists(log): p.error("--log already exists; use a new report name")
     if args.limit_matched<0 or args.max_recipients<1 or args.progress<1: p.error("Invalid numeric argument")
     try:
         import pypff
     except ImportError:
-        p.error("Install the native reader: python -m pip install --only-binary=:all: libpff-python")
+        p.error(PST_INSTALL_HELP)
     if args.recover_rtf:
         try:
             from striprtf.striprtf import rtf_to_text  # noqa: F401
         except ImportError:
-            p.error("--recover-rtf needs striprtf; install requirements/recovery.txt")
-    target.parent.mkdir(parents=True,exist_ok=True)
-    log.parent.mkdir(parents=True,exist_ok=True)
-    fd,filename=tempfile.mkstemp(prefix=".email-funes-recovery-",suffix=".sqlite",dir=target.parent)
+            p.error('--recover-rtf needs striprtf. From the checkout run: python -m pip install ".[rtf]"')
+    try:
+        private_mkdir(target.parent)
+        with new_private_text(log) as report:
+            return recover_to_new_file(pst, source, target, log, report, args, pypff)
+    except OSError as exc:
+        print(diagnostic("recovery.output", exc),file=sys.stderr)
+        return 1
+
+
+def recover_to_new_file(pst, source, target, log, report, args, pypff):
+    fd, filename = tempfile.mkstemp(prefix=".email-funes-recovery-", suffix=".sqlite", dir=target.parent)
     os.close(fd)
-    working=Path(filename)
+    working = Path(filename)
     try:
         print("Creating a separate SQLite copy; original PST and database stay unchanged.",flush=True)
         outcome=run_recovery(pst,source,working,log,args.limit_matched,args.max_recipients,args.progress,args.recover_rtf,pypff)
-        log.write_text(safe_log(outcome,pst),encoding="utf-8")
+        report.write(safe_log(outcome,pst))
+        report.flush()
         publish_database(working,target)
         print(f"Completed. Unique rows enriched: {outcome['counts']['messages_recovered']:,}")
-        print("Safe report:",log)
-        print("New SQLite copy:",target)
-        print("Review the .log before sharing it.")
+        print("Published the enriched database and wrote the diagnostic report.")
         return 0 if not outcome["errors"] else 2
     except KeyboardInterrupt:
-        log.write_text(failure_log(KeyboardInterrupt()),encoding="utf-8")
+        report.seek(0)
+        report.truncate()
+        report.write(failure_log(KeyboardInterrupt()))
         print("Interrupted; original files unchanged. Re-run with a new output path.",file=sys.stderr)
         return 130
     except Exception as exc:
         # Do not print exception text; malformed PST metadata can contain PII.
         try:
-            log.write_text(failure_log(exc),encoding="utf-8")
+            report.seek(0)
+            report.truncate()
+            report.write(failure_log(exc))
         except OSError:
             print("The sanitized failure report could not be written.",file=sys.stderr)
         print(f"Recovery aborted ({type(exc).__name__}). The original files remain unchanged.",file=sys.stderr)
@@ -743,7 +758,8 @@ def main(argv=None):
             print(str(exc),file=sys.stderr)
         return 1
     finally:
-        if working.exists(): working.unlink()
+        for member in sqlite_paths(working):
+            member.unlink(missing_ok=True)
 
 
 if __name__=="__main__":

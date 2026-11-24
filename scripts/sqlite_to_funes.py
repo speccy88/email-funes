@@ -12,13 +12,25 @@ Usage:
 from __future__ import annotations
 
 import argparse
+from contextlib import closing
 from dataclasses import asdict, dataclass
 from datetime import datetime
+from itertools import groupby
 import json
+import re
 import sqlite3
-import shutil
-import tempfile
+import sys
 from pathlib import Path
+
+from email_funes_common import validate_existing_database
+from email_funes_files import (
+    FileSafetyError, check_destination as check_snapshot_directory, new_private_text,
+    open_readonly, protect_sqlite, sqlite_paths, staged_directory,
+)
+
+
+class ExportError(ValueError):
+    """A content-free diagnostic safe to display in ordinary output."""
 
 
 @dataclass(frozen=True)
@@ -41,19 +53,46 @@ def table_exists(db: sqlite3.Connection, name: str) -> bool:
     ).fetchone() is not None
 
 
+def stored_policy_json(db: sqlite3.Connection) -> str | None:
+    if table_exists(db, "funes_export_policy"):
+        row = db.execute("SELECT policy_json FROM funes_export_policy WHERE singleton=1").fetchone()
+        if row is not None:
+            return row[0]
+    return None
+
+
 def resolve_policy(db: sqlite3.Connection, *, include_meetings: bool = False,
                    include_all: bool = False, include_bcc: bool = False) -> ExportPolicy:
     """Select email records when the database contains recovery classification."""
     columns = {row[1] for row in db.execute("PRAGMA table_info(messages)")}
     if not columns:
-        raise ValueError("The database has no messages table")
+        raise ExportError("The database has no messages table")
     if include_meetings and include_all:
-        raise ValueError("Choose --include-meetings or --include-all, not both")
+        raise ExportError("Choose one selection option")
     classified = "message_category" in columns
     if include_meetings and not classified:
-        raise ValueError("--include-meetings requires message classification; run metadata recovery first")
-    selection = "all" if include_all or not classified else "email-and-meetings" if include_meetings else "email"
+        raise ExportError("--include-meetings requires message classification; run metadata recovery first")
     recipient_source = "normalized" if table_exists(db, "recovery_recipients") else "legacy"
+    explicit_selection = "all" if include_all else "email-and-meetings" if include_meetings else None
+    saved = stored_policy_json(db)
+    if saved is not None:
+        # Only recognize the v1 settings that this schema can actually render.
+        for selection in (("email", "email-and-meetings", "all") if classified else ("all",)):
+            for bcc in (False, True):
+                candidate = ExportPolicy(selection, classified, recipient_source, bcc)
+                if candidate.serialize() == saved:
+                    if explicit_selection and explicit_selection != selection:
+                        raise ExportError("Export policy differs from the stored Funes mapping. Use the saved options.")
+                    if bcc != include_bcc:
+                        raise ExportError("Export policy differs from the stored Bcc choice. Repeat the original Bcc option.")
+                    return candidate
+        raise ExportError("The saved export policy and current database schema are incompatible. "
+                          "Use the original database or deliberately rebuild into a fresh memory.")
+    mapped = table_exists(db, "funes_map") and db.execute("SELECT 1 FROM funes_map LIMIT 1").fetchone()
+    if not classified and not include_all and not mapped:
+        raise ExportError("Legacy database without message classification. Run recovery on a fresh copy "
+                          "or choose --include-all to export every retained Outlook item.")
+    selection = explicit_selection or ("email" if classified else "all")
     return ExportPolicy(selection, classified, recipient_source, include_bcc)
 
 
@@ -70,20 +109,17 @@ def selection_sql(policy: ExportPolicy) -> tuple[str, tuple[str, ...]]:
 
 def validate_policy(db: sqlite3.Connection, policy: ExportPolicy) -> None:
     """Check compatibility without writing tables or changing existing identities."""
-    if table_exists(db, "funes_export_policy"):
-        row = db.execute("SELECT policy_json FROM funes_export_policy WHERE singleton=1").fetchone()
-        if row and row[0] != policy.serialize():
-            raise ValueError(
-                "Export policy differs from the stored Funes mapping. Keep the original options, "
-                "or deliberately rebuild the mapping in a separate database copy and use a fresh Funes memory."
-            )
-    else:
-        row = None
+    saved = stored_policy_json(db)
+    if saved is not None and saved != policy.serialize():
+        raise ExportError(
+            "Export policy differs from the stored Funes mapping. Keep the original options, "
+            "or deliberately rebuild the mapping in a separate database copy and use a fresh Funes memory."
+        )
     if not table_exists(db, "funes_map"):
         return
     mapped = db.execute("SELECT COUNT(*) FROM funes_map").fetchone()[0]
-    if mapped and row is None and policy != ExportPolicy():
-        raise ValueError(
+    if mapped and saved is None and policy != ExportPolicy():
+        raise ExportError(
             "Existing Funes mapping has no export policy and uses legacy rendering. "
             "Enriched selection or recipient changes require a deliberately rebuilt mapping "
             "in a separate database copy and a fresh Funes memory."
@@ -94,7 +130,7 @@ def validate_policy(db: sqlite3.Connection, policy: ExportPolicy) -> None:
         f"WHERE m.id IS NULL OR NOT ({predicate})", params,
     ).fetchone()[0]
     if excluded:
-        raise ValueError(
+        raise ExportError(
             f"Existing Funes mapping contains {excluded:,} missing or excluded messages; "
             "refusing to omit or renumber mapped turns. Use a deliberately rebuilt mapping and fresh Funes memory."
         )
@@ -139,8 +175,18 @@ def print_summary(summary: dict, policy: ExportPolicy) -> None:
         print("Legacy database: message classification is unavailable; all records remain eligible. Run metadata recovery to distinguish emails from other Outlook items.")
     print(f"Database records: {summary['total']:,}; selected: {summary['selected']:,}; excluded: {summary['excluded']:,}")
     print(f"Selected records with missing dates: {summary['missing_dates']:,}; exportable by selection/date availability: {summary['exportable']:,}; existing mappings: {summary['mapped']:,}")
+    # An imported database can supply arbitrary text in a classification field.
+    public_categories = {"Email / IPM.Note", "Email", "Meeting request", "Meeting", "Appointment",
+                         "Contact / distribution list", "Task", "Note", "Unknown / other",
+                         "Unclassified", "Unclassified (legacy schema)"}
+    other = 0
     for category, count in summary["categories"].items():
-        print(f"  {category}: {count:,}")
+        if category in public_categories:
+            print(f"  {category}: {count:,}")
+        else:
+            other += count
+    if other:
+        print(f"  Other category: {other:,}")
 
 
 def ensure_map(db: sqlite3.Connection):
@@ -155,11 +201,15 @@ def ensure_map(db: sqlite3.Connection):
         )
     """)
     db.execute("CREATE INDEX IF NOT EXISTS funes_map_session ON funes_map(session_id,seq)")
-    db.commit()
 
 
 def map_new_messages(db: sqlite3.Connection, policy: ExportPolicy | None = None) -> tuple[int, int]:
     """Assign a permanent seq exactly once. Late arrivals append to their session."""
+    with db:
+        return _assign_turns(db, policy)
+
+
+def _assign_turns(db: sqlite3.Connection, policy: ExportPolicy | None) -> tuple[int, int]:
     policy = policy or resolve_policy(db)
     remember_policy(db, policy)
     predicate, params = selection_sql(policy)
@@ -182,9 +232,6 @@ def map_new_messages(db: sqlite3.Connection, policy: ExportPolicy | None = None)
                    (mid, sid, turn, seq))
         next_seq[sid] = seq + 1
         added += 1
-        if added % 5000 == 0:
-            db.commit()
-    db.commit()
     return added, no_date
 
 
@@ -235,16 +282,19 @@ def turns(db: sqlite3.Connection, policy: ExportPolicy | None = None):
         if sid != previous_session:
             previous_session, expected_sequence = sid, 0
         if seq != expected_sequence:
-            raise ValueError(f"Non-dense Funes sequence in session {sid!r}; retain mapped rows or rebuild the export mapping deliberately")
+            raise ExportError("Non-dense Funes sequence. Retain mapped rows or rebuild the export mapping deliberately.")
         expected_sequence += 1
-        if not ts or not ts.endswith("Z"):
-            raise ValueError(f"Invalid UTC timestamp in message {turn!r}")
-        datetime.fromisoformat(ts[:-1] + "+00:00")
+        if not isinstance(ts, str) or not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?Z", ts):
+            raise ExportError("Invalid UTC timestamp in a selected message.")
+        try:
+            datetime.fromisoformat(ts[:-1] + "+00:00")
+        except ValueError:
+            raise ExportError("Invalid UTC timestamp in a selected message.") from None
         if ":" in sid or ":" in turn or not sid or not turn or seq < 0:
-            raise ValueError(f"Invalid Funes identity in message {turn!r}")
+            raise ExportError("Invalid Funes identity in a selected message.")
         attachments = json.loads(att_json)
         if not isinstance(attachments, list) or any(not isinstance(name, str) for name in attachments):
-            raise ValueError(f"Invalid attachment filename array in message {turn!r}")
+            raise ExportError("Invalid attachment filename array in a selected message.")
         to, cc, bcc = recipient_lines(db, mid, to, cc, policy)
         header = [
             f"From: {sender} <{email}>" if sender else f"From: {email}",
@@ -271,54 +321,46 @@ def turns(db: sqlite3.Connection, policy: ExportPolicy | None = None):
         }
 
 
-def check_destination(out_dir: Path) -> None:
+def check_destination(out_dir: Path, db_path: Path | None = None) -> None:
     """Never mix snapshots or overwrite an older export."""
-    if out_dir.exists() and (not out_dir.is_dir() or any(out_dir.iterdir())):
-        raise ValueError(f"Output must be a new or empty directory: {out_dir}. Use a new snapshot folder.")
+    if db_path:
+        reserved = {p.resolve() for p in sqlite_paths(db_path)}
+        target = out_dir.resolve()
+        if target in reserved or reserved.intersection(target.parents):
+            raise ExportError("Output collides with the database or a SQLite sidecar. Use a new snapshot folder.")
+    check_snapshot_directory(out_dir)
 
 
 def export(db: sqlite3.Connection, out_dir: Path, per_file: int = 2000,
-           policy: ExportPolicy | None = None) -> int:
+           policy: ExportPolicy | None = None, *, commit_mappings: bool = False) -> int:
     """Stage the whole snapshot, then publish its directory after success."""
     if per_file < 1:
-        raise ValueError("per_file must be at least 1")
-    check_destination(out_dir)
-    out_dir.parent.mkdir(parents=True, exist_ok=True)
-    staging = Path(tempfile.mkdtemp(prefix=".email-funes-export-", dir=out_dir.parent))
+        raise ExportError("per_file must be at least 1")
+    database = next(name for _, schema, name in db.execute("PRAGMA database_list") if schema == "main")
+    db_path = Path(database) if database else None
+    check_destination(out_dir, db_path)
     file_count, turn_count = 0, 0
-    fh = None
-    try:
-        for turn in turns(db, policy):
-            if turn_count % per_file == 0:
-                if fh is not None:
-                    fh.close()
-                file_count += 1
-                # Staging extensions prevent indexing unfinished export files.
-                temp_path = staging / f"outlook-{file_count:06d}.tmp"
-                fh = temp_path.open("w", encoding="utf-8", newline="\n")
-            fh.write(json.dumps(turn, ensure_ascii=False, separators=(",", ":")) + "\n")
-            turn_count += 1
-        if fh is not None:
-            fh.close()
+    # Once the snapshot passes validation, commit mappings before it becomes visible.
+    with (
+        staged_directory(out_dir, before_publish=db.commit if commit_mappings else None) as staging,
+        closing(turns(db, policy)) as records,
+    ):
+        batches = groupby(enumerate(records), key=lambda item: item[0] // per_file)
+        for batch_number, batch in batches:
+            file_count = batch_number + 1
+            with new_private_text(staging / f"outlook-{file_count:06d}.tmp") as fh:
+                for _, turn in batch:
+                    fh.write(json.dumps(turn, ensure_ascii=False, separators=(",", ":")) + "\n")
+                    turn_count += 1
         for temp_path in staging.glob("*.tmp"):
             temp_path.replace(temp_path.with_suffix(".funes.jsonl"))
-        # Check again immediately before publishing; never remove existing data.
-        check_destination(out_dir)
-        if out_dir.exists():
-            out_dir.rmdir()
-        staging.replace(out_dir)
-    finally:
-        if fh is not None and not fh.closed:
-            fh.close()
-        if staging.exists():
-            shutil.rmtree(staging)
-    print(f"Exported {turn_count:,} turns to {file_count:,} .funes.jsonl files in {out_dir}")
+    print(f"Exported {turn_count:,} turns to {file_count:,} .funes.jsonl files.")
     print("Stable turn IDs and sequence numbers are retained in SQLite funes_map.")
     return turn_count
 
 
-def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+def main(argv: list[str] | None = None, *, prog: str | None = None) -> int:
+    p = argparse.ArgumentParser(prog=prog, description="Preview selection or export Funes JSONL with permanent turn IDs.")
     p.add_argument("--db", required=True, type=Path, help="SQLite database generated by an email-funes importer")
     p.add_argument("--out", type=Path, help="New or empty directory for Funes import files (not needed for --dry-run)")
     p.add_argument("--dry-run", action="store_true", help="Read-only selection summary; do not create mappings or JSONL")
@@ -332,35 +374,39 @@ def main(argv: list[str] | None = None) -> int:
         p.error("--db must be an existing SQLite file, and --turns-per-file must be >= 1")
     if not args.dry_run and args.out is None:
         p.error("--out is required unless --dry-run is selected")
-    if args.out is not None and args.out.resolve() == args.db.resolve():
-        p.error("--out must be a directory, not the database file")
     try:
-        if not args.dry_run:
-            check_destination(args.out)
-    except ValueError as exc:
-        p.error(str(exc))
-    # Opening mode=ro is also enforced by SQLite, not just by avoiding write calls.
-    uri = args.db.resolve().as_uri() + ("?mode=ro" if args.dry_run else "?mode=rw")
-    db = sqlite3.connect(uri, uri=True, timeout=120)
-    db.execute("PRAGMA foreign_keys=ON")
-    try:
-        policy = resolve_policy(db, include_meetings=args.include_meetings,
-                                include_all=args.include_all, include_bcc=args.include_bcc)
-        print_summary(summarize(db, policy), policy)
-        validate_policy(db, policy)
         if args.dry_run:
-            print("Dry run complete. No database changes or JSONL files were made; message content and timestamps have not been fully validated.")
-            return 0
-        ensure_map(db)
-        new, missing = map_new_messages(db, policy)
-        print(f"Assigned new stable Funes turn IDs: {new:,}; skipped messages with missing dates: {missing:,}")
-        export(db, args.out, args.turns_per_file, policy)
+            db = open_readonly(args.db)
+        else:
+            check_destination(args.out, args.db)
+            if not validate_existing_database(args.db):
+                raise ExportError("The database is empty. Import an archive before exporting.")
+            protect_sqlite(args.db)
+            db = sqlite3.connect(args.db.resolve().as_uri() + "?mode=rw", uri=True, timeout=120)
+        with closing(db), db:
+            db.execute("PRAGMA foreign_keys=ON")
+            db.execute("BEGIN" if args.dry_run else "BEGIN IMMEDIATE")
+            policy = resolve_policy(db, include_meetings=args.include_meetings,
+                                    include_all=args.include_all, include_bcc=args.include_bcc)
+            validate_policy(db, policy)
+            print_summary(summarize(db, policy), policy)
+            if args.dry_run:
+                print("Dry run complete. No database changes or JSONL files were made; message content and timestamps have not been fully validated.")
+                return 0
+            ensure_map(db)
+            new, missing = _assign_turns(db, policy)
+            export(db, args.out, args.turns_per_file, policy, commit_mappings=True)
+            print(f"Assigned new stable Funes turn IDs: {new:,}; skipped messages with missing dates: {missing:,}")
         return 0
-    except (ValueError, sqlite3.Error) as exc:
-        print(f"ERROR: {exc}")
+    except (ExportError, FileSafetyError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
         return 2
-    finally:
-        db.close()
+    except KeyboardInterrupt:
+        print("Export interrupted.", file=sys.stderr)
+        return 130
+    except Exception as exc:
+        print(f"Export failed ({type(exc).__name__}). Check the input schema, data and output location.", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":
