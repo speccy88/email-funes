@@ -1,6 +1,6 @@
 # Reporting security concerns
 
-Open a [repository issue](https://github.com/speccy88/email-funes/issues) with the title “Request for private security contact”. Include the affected version or commit and a way for the maintainer to reach you. Share technical details through the private channel you agree on with the maintainer. Keep archives, databases, excerpts, paths, addresses and private logs out of issue reports. The issue tracker requires repository access while this project is private.
+Open a [repository issue](https://github.com/speccy88/email-funes/issues) with the title “Request for private security contact”. Include the affected version or commit and a way for the maintainer to reach you. Share technical details through the private channel you agree on with the maintainer. Keep archives, databases, excerpts, paths, addresses and private logs out of issue reports. This issue tracker is public. Use the initial issue only to arrange contact.
 
 ## Local data and diagnostics
 

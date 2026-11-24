@@ -51,7 +51,7 @@ MAPI is Outlook's internal property model. Some messages have useful sender, rec
 
 ## Install and compatibility
 
-Install from a checkout of this repository. Cloning a private checkout requires GitHub read access. The base package uses Python 3.10+ with SQLite FTS5 and has no runtime package dependencies. The native readers are separate extras.
+Install from the GitHub checkout. The base package uses Python 3.10+ with SQLite FTS5 and has no runtime package dependencies. The native readers are separate extras.
 
 **PowerShell**
 
