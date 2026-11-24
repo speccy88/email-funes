@@ -1,5 +1,6 @@
 """Exercise the installed console command offline. Usage: python tests/smoke_wheel.py dist"""
 
+from email.parser import BytesParser
 import json
 import os
 from pathlib import Path
@@ -17,7 +18,7 @@ MODULES = {
     "pst_metadata_audit.py", "pst_sqlite_recover.py", "pst_to_sqlite.py",
     "pst_to_sqlite_direct.py", "sqlite_to_funes.py",
 }
-METADATA = {"entry_points.txt", "METADATA", "RECORD", "WHEEL"}
+METADATA = {"entry_points.txt", "METADATA", "RECORD", "WHEEL", "licenses/LICENSE"}
 
 
 def check_wheel(wheel):
@@ -26,6 +27,12 @@ def check_wheel(wheel):
         metadata = {p for p in files if ".dist-info/" in p}
         if files - metadata != MODULES or {p.split("/", 1)[1] for p in metadata} != METADATA:
             raise AssertionError("The wheel differs from the reviewed list of modules and package metadata")
+        (metadata_file,) = (p for p in metadata if p.endswith("/METADATA"))
+        headers = BytesParser().parsebytes(archive.read(metadata_file), headersonly=True)
+        assert headers["License-Expression"] == "MIT"
+        assert headers.get_all("License-File") == ["LICENSE"]
+        dist_info = metadata_file.rsplit("/", 1)[0]
+        assert archive.read(f"{dist_info}/licenses/LICENSE") == (ROOT / "LICENSE").read_bytes()
 
     with tempfile.TemporaryDirectory() as temp:
         cwd = Path(temp)

@@ -18,9 +18,9 @@ Gitleaks 8.30.1 found no leaks in the available Git history and proposed tree. p
 
 These lookups cover published Python package advisories. They provide no independent audit of the C implementation or of every component inside a binary wheel.
 
-## License decision
+## Licensing
 
-The repository currently has no project license. Public access and permission to redistribute are separate owner decisions. A proposed choice for the original Python code and documentation is MIT. The owner should confirm rights and attribution before granting it. Installing the converter wheel installs project Python code and metadata. It contains no vendored parser, Funes executable, decoder or COM library.
+The original project code and documentation use the MIT License. The wheel includes the license notice alongside the project code and package metadata. Optional parsers, decoders, COM libraries and the Funes executable are distributed separately under their own licenses. [MIT License](../LICENSE)
 
 | Separately installed dependency | Distribution considerations |
 | --- | --- |

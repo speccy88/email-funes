@@ -190,11 +190,15 @@ python -m unittest discover -s tests -v
 
 GitHub Actions runs offline tests and the synthetic workflow on Windows and Linux. Native PST extraction still needs validation against the actual archive and its error log; synthetic tests do not establish complete support for every PST variant.
 
-The [verification record](docs/compatibility.md) lists the upstream commits, platform checks, dependency notices and open license decision.
+The [verification record](docs/compatibility.md) lists the upstream commits and platform checks.
 
 The next adapter candidates are EML, MBOX and Maildir. Each needs normalized messages, stable source provenance and fixtures before it can be supported. [Adapter contract](docs/adding-converters.md)
 
 The repository contains code, documentation, and synthetic examples. Email archives, databases, generated exports, logs, and credentials are ignored by Git.
+
+## License
+
+The original project code and documentation are available under the MIT License. Optional dependencies are distributed separately under their own terms. [MIT License](LICENSE) · [Dependency license notices](docs/compatibility.md#licensing)
 
 ## References
 
